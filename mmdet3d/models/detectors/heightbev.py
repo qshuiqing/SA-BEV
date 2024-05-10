@@ -43,7 +43,7 @@ class HeightBEV(BEVDepth4D):
         imgs = imgs.view(B * N, C, imH, imW)
         x = list(self.img_backbone(imgs))
         if self.with_img_neck:
-            x[1] = self.img_neck(x[1:])
+            x[1] = self.img_neck(x)
             if type(x) in [list, tuple]:
                 x = x[:2]
         for i in range(2):

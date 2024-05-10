@@ -14,8 +14,7 @@ data_config = {
         'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT',
         'CAM_BACK', 'CAM_BACK_RIGHT'
     ],
-    'Ncams':
-        6,
+    'Ncams': 6,
     'input_size': (256, 704),
     'src_size': (900, 1600),
 
@@ -28,12 +27,12 @@ data_config = {
 }
 
 # Model
-grid_config = {
-    'x': [-51.2, 51.2, 0.8],
-    'y': [-51.2, 51.2, 0.8],
-    'z': [-5, 3, 8],
-    'depth': [1.0, 60.0, 0.5],
-}
+# grid_config = {
+#     'x': [-51.2, 51.2, 0.8],
+#     'y': [-51.2, 51.2, 0.8],
+#     'z': [-5, 3, 8],
+#     'depth': [1.0, 60.0, 0.5],
+# }
 
 bda_aug_conf = dict(
     rot_lim=(-22.5, 22.5),
@@ -69,7 +68,7 @@ model = dict(
         style='pytorch'),
     img_neck=dict(
         type='CustomFPN',
-        in_channels=[1024, 2048],
+        in_channels=[512, 1024, 2048],
         out_channels=256,
         num_outs=1,
         start_level=0,
@@ -174,7 +173,7 @@ train_pipeline = [
     dict(
         type='PrepareImageInputs',
         is_train=True,
-        load_point_label=True,
+        load_point_label=False,
         data_config=data_config,
         sequential=use_sequential),
     dict(
@@ -240,8 +239,8 @@ test_data_config = dict(
     ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_val.pkl')
 
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=1,
+    samples_per_gpu=4,
+    workers_per_gpu=4,
     train=dict(
         data_root=data_root,
         ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_train.pkl',
@@ -268,7 +267,10 @@ lr_config = dict(
     warmup_iters=200,
     warmup_ratio=0.001,
     step=[24, ])
+
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 runner = dict(type='EpochBasedRunner', max_epochs=24)
+evaluation = dict(interval=4, pipeline=test_pipeline)
 
 custom_hooks = [
     dict(
