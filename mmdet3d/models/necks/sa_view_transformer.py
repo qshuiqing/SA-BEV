@@ -358,7 +358,7 @@ class SABEVPool(LSSViewTransformerBEVDepth):
         bev_feat = bev_pool_v2(depth, feat, ranks_depth, ranks_feat, ranks_bev,
                                bev_feat_shape, interval_starts,
                                interval_lengths)
-        # collapse Z
+        # collapse Z (B, C, Z, Y, X)->(B, C * Z, Y, X)
         bev_feat = torch.cat(bev_feat.unbind(dim=2), 1)
         return bev_feat
 

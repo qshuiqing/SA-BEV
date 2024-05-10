@@ -88,7 +88,7 @@ def bev_pool_v2(depth, feat, ranks_depth, ranks_feat, ranks_bev,
     x = QuickCumsumCuda.apply(depth, feat, ranks_depth, ranks_feat, ranks_bev,
                               bev_feat_shape, interval_starts,
                               interval_lengths)
-    x = x.permute(0, 4, 1, 2, 3).contiguous()
+    x = x.permute(0, 4, 1, 2, 3).contiguous()  # (B, C, Z, Y, X)
     return x
 
 

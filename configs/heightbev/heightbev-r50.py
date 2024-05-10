@@ -1,5 +1,3 @@
-# Copyright (c) Phigent Robotics. All rights reserved.
-
 _base_ = ['../_base_/datasets/nus-3d.py', '../_base_/default_runtime.py']
 # Global
 # If point cloud range is changed, the models should also change their point
@@ -17,7 +15,7 @@ data_config = {
         'CAM_BACK', 'CAM_BACK_RIGHT'
     ],
     'Ncams':
-    6,
+        6,
     'input_size': (256, 704),
     'src_size': (900, 1600),
 
@@ -34,47 +32,65 @@ grid_config = {
     'x': [-51.2, 51.2, 0.8],
     'y': [-51.2, 51.2, 0.8],
     'z': [-5, 3, 8],
-    'depth': [1.0, 60.0, 1.0],
+    'depth': [1.0, 60.0, 0.5],
 }
+
+bda_aug_conf = dict(
+    rot_lim=(-22.5, 22.5),
+    scale_lim=(0.95, 1.05),
+    flip_dx_ratio=0.5,
+    flip_dy_ratio=0.5)
 
 voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-multi_adj_frame_id_cfg = (1, 8+1, 1)
+with_cp = False
+use_bev_paste = False
+use_sequential = False
+n_frame = 1 + 1 if use_sequential else 1
+multi_adj_frame_id_cfg = (1, n_frame, 1)
 
 model = dict(
-    type='BEVDet4D',
-    align_after_view_transfromation=False,
+    type='HeightBEV',
+    use_bev_paste=use_bev_paste,
+    bda_aug_conf=bda_aug_conf,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     img_backbone=dict(
-        pretrained='torchvision://resnet50',
         type='ResNet',
         depth=50,
         num_stages=4,
-        out_indices=(2, 3),
+        out_indices=(1, 2, 3),
         frozen_stages=-1,
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=False,
-        with_cp=True,
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50'),
+        with_cp=with_cp,
         style='pytorch'),
     img_neck=dict(
         type='CustomFPN',
         in_channels=[1024, 2048],
-        out_channels=512,
+        out_channels=256,
         num_outs=1,
         start_level=0,
         out_ids=[0]),
     img_view_transformer=dict(
-        type='LSSViewTransformer',
-        grid_config=grid_config,
+        type='HeightVT',
         input_size=data_config['input_size'],
-        in_channels=512,
-        out_channels=numC_Trans,
-        downsample=16),
+        n_voxels=[
+            [256, 256, 6],  # 4x
+            # [192, 192, 6],  # 8x
+            # [128, 128, 6],  # 16x
+        ],
+        voxel_size=[
+            [0.4, 0.4, 1.0],  # 4x
+            # [8 / 15, 8 / 15, 1.0],  # 8x
+            # [0.8, 0.8, 1.0],  # 16x
+        ],
+    ),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
-        numC_input=numC_Trans * (len(range(*multi_adj_frame_id_cfg))+1),
+        numC_input=numC_Trans * (len(range(*multi_adj_frame_id_cfg)) + 1),
         num_channels=[numC_Trans * 2, numC_Trans * 4, numC_Trans * 8]),
     img_bev_encoder_neck=dict(
         type='FPN_LSS',
@@ -82,11 +98,11 @@ model = dict(
         out_channels=256),
     pre_process=dict(
         type='CustomResNet',
-        numC_input=numC_Trans,
-        num_layer=[2,],
-        num_channels=[numC_Trans,],
-        stride=[1,],
-        backbone_output_ids=[0,]),
+        numC_input=256 * 6,
+        num_layer=[2, ],
+        num_channels=[numC_Trans, ],
+        stride=[2, ],
+        backbone_output_ids=[0, ]),
     pts_bbox_head=dict(
         type='CenterHead',
         in_channels=256,
@@ -154,31 +170,30 @@ dataset_type = 'NuScenesDataset'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 
-bda_aug_conf = dict(
-    rot_lim=(-22.5, 22.5),
-    scale_lim=(0.95, 1.05),
-    flip_dx_ratio=0.5,
-    flip_dy_ratio=0.5)
-
 train_pipeline = [
     dict(
         type='PrepareImageInputs',
         is_train=True,
+        load_point_label=True,
         data_config=data_config,
-        sequential=True),
+        sequential=use_sequential),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
         classes=class_names),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
+    dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
         type='Collect3D', keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d'])
 ]
 
 test_pipeline = [
-    dict(type='PrepareImageInputs', data_config=data_config, sequential=True),
+    dict(
+        type='PrepareImageInputs',
+        data_config=data_config,
+        sequential=True),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
@@ -190,6 +205,7 @@ test_pipeline = [
         load_dim=5,
         use_dim=5,
         file_client_args=file_client_args),
+    dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1333, 800),
@@ -215,35 +231,33 @@ share_data_config = dict(
     type=dataset_type,
     classes=class_names,
     modality=input_modality,
-    img_info_prototype='bevdet4d',
+    img_info_prototype='bevdet',
     multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
 )
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file=data_root + 'bevdetv2-nuscenes_infos_val.pkl')
+    ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_val.pkl')
 
 data = dict(
-    samples_per_gpu=8,
-    workers_per_gpu=4,
+    samples_per_gpu=1,
+    workers_per_gpu=1,
     train=dict(
-        type='CBGSDataset',
-        dataset=dict(
         data_root=data_root,
-        ann_file=data_root + 'bevdetv2-nuscenes_infos_train.pkl',
+        ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
         use_valid_flag=True,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-        box_type_3d='LiDAR')),
+        box_type_3d='LiDAR'),
     val=test_data_config,
     test=test_data_config)
 
 for key in ['val', 'test']:
     data[key].update(share_data_config)
-data['train']['dataset'].update(share_data_config)
+data['train'].update(share_data_config)
 
 # Optimizer
 optimizer = dict(type='AdamW', lr=2e-4, weight_decay=1e-2)
@@ -253,8 +267,8 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=200,
     warmup_ratio=0.001,
-    step=[20,])
-runner = dict(type='EpochBasedRunner', max_epochs=20)
+    step=[24, ])
+runner = dict(type='EpochBasedRunner', max_epochs=24)
 
 custom_hooks = [
     dict(
@@ -264,8 +278,8 @@ custom_hooks = [
     ),
     dict(
         type='SequentialControlHook',
-        temporal_start_epoch=2,
+        temporal_start_epoch=3,
     ),
 ]
 
-# fp16 = dict(loss_scale='dynamic')
+fp16 = dict(loss_scale='dynamic')

@@ -3,12 +3,12 @@ import mmcv
 import numpy as np
 import torch
 from PIL import Image
+from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
 from pyquaternion import Quaternion
 
 from mmdet3d.core.points import BasePoints, get_points_type
-from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
-from ...core.bbox import LiDARInstance3DBoxes
 from ..builder import PIPELINES
+from ...core.bbox import LiDARInstance3DBoxes
 
 
 @PIPELINES.register_module()
@@ -330,11 +330,11 @@ class NormalizePointsColor(object):
         """
         points = results['points']
         assert points.attribute_dims is not None and \
-            'color' in points.attribute_dims.keys(), \
+               'color' in points.attribute_dims.keys(), \
             'Expect points have color attribute'
         if self.color_mean is not None:
             points.color = points.color - \
-                points.color.new_tensor(self.color_mean)
+                           points.color.new_tensor(self.color_mean)
         points.color = points.color / 255.0
         results['points'] = points
         return results
@@ -710,9 +710,9 @@ class PointToMultiViewDepth(object):
         coor = torch.round(points[:, :2] / self.downsample)
         depth = points[:, 2]
         kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & (
-            coor[:, 1] >= 0) & (coor[:, 1] < height) & (
-                depth < self.grid_config['depth'][1]) & (
-                    depth >= self.grid_config['depth'][0])
+                coor[:, 1] >= 0) & (coor[:, 1] < height) & (
+                        depth < self.grid_config['depth'][1]) & (
+                        depth >= self.grid_config['depth'][0])
         coor, depth = coor[kept1], depth[kept1]
         ranks = coor[:, 0] + coor[:, 1] * width
         sort = (ranks + depth / 100.).argsort()
@@ -805,12 +805,12 @@ class PrepareImageInputs(object):
     """
 
     def __init__(
-        self,
-        data_config,
-        is_train=False,
-        sequential=False,
-        ego_cam='CAM_FRONT',
-        load_point_label=False,
+            self,
+            data_config,
+            is_train=False,
+            sequential=False,
+            ego_cam='CAM_FRONT',
+            load_point_label=False,
     ):
         self.is_train = is_train
         self.data_config = data_config
@@ -880,14 +880,14 @@ class PrepareImageInputs(object):
 
         depth_map = np.zeros(resize_dims)
         valid_mask = ((coords[:, 1] < resize_dims[0])
-                    & (coords[:, 0] < resize_dims[1])
-                    & (coords[:, 1] >= 0)
-                    & (coords[:, 0] >= 0))
+                      & (coords[:, 0] < resize_dims[1])
+                      & (coords[:, 1] >= 0)
+                      & (coords[:, 0] >= 0))
         depth_map[coords[valid_mask, 1],
-                coords[valid_mask, 0]] = point_label[valid_mask, 2]
+        coords[valid_mask, 0]] = point_label[valid_mask, 2]
         semantic_map = np.zeros(resize_dims)
         semantic_map[coords[valid_mask, 1],
-                coords[valid_mask, 0]] = (point_label[valid_mask, 3] >= 0)
+        coords[valid_mask, 0]] = (point_label[valid_mask, 3] >= 0)
         return torch.Tensor(depth_map), torch.Tensor(semantic_map)
 
     def choose_cams(self):
@@ -995,8 +995,8 @@ class PrepareImageInputs(object):
         keysensor2keyego[:3, -1] = keysensor2keyego_tran
         keyego2keysensor = keysensor2keyego.inverse()
         keysensor2sweepsensor = (
-            keyego2keysensor @ global2keyego @ sweepego2global
-            @ sweepsensor2sweepego).inverse()
+                keyego2keysensor @ global2keyego @ sweepego2global
+                @ sweepsensor2sweepego).inverse()
         return sweepsensor2keyego, keysensor2sweepsensor
 
     def get_inputs(self, results, flip=None, scale=None):
@@ -1043,12 +1043,12 @@ class PrepareImageInputs(object):
 
             if self.load_point_label:
                 point_filename = filename.replace('samples/', 'samples_point_label/'
-                                                  ).replace('.jpg','.npy')
+                                                  ).replace('.jpg', '.npy')
                 point_label = np.load(point_filename).astype(np.float64)[:4].T
                 point_depth_augmented, point_semantic_augmented = \
                     self.point_label_transform(
-                            point_label, resize, self.data_config['input_size'],
-                            crop, flip, rotate)
+                        point_label, resize, self.data_config['input_size'],
+                        crop, flip, rotate)
                 gt_depth.append(point_depth_augmented)
                 gt_semantic.append(point_semantic_augmented)
 
@@ -1167,17 +1167,17 @@ class LoadAnnotationsBEVDepth(object):
         rot_mat = flip_mat @ (scale_mat @ rot_mat)
         if gt_boxes.shape[0] > 0:
             gt_boxes[:, :3] = (
-                rot_mat @ gt_boxes[:, :3].unsqueeze(-1)).squeeze(-1)
+                    rot_mat @ gt_boxes[:, :3].unsqueeze(-1)).squeeze(-1)
             gt_boxes[:, 3:6] *= scale_ratio
             gt_boxes[:, 6] += rotate_angle
             if flip_dx:
                 gt_boxes[:,
-                         6] = 2 * torch.asin(torch.tensor(1.0)) - gt_boxes[:,
-                                                                           6]
+                6] = 2 * torch.asin(torch.tensor(1.0)) - gt_boxes[:,
+                                                         6]
             if flip_dy:
                 gt_boxes[:, 6] = -gt_boxes[:, 6]
             gt_boxes[:, 7:] = (
-                rot_mat[:2, :2] @ gt_boxes[:, 7:].unsqueeze(-1)).squeeze(-1)
+                    rot_mat[:2, :2] @ gt_boxes[:, 7:].unsqueeze(-1)).squeeze(-1)
         return gt_boxes, rot_mat
 
     def __call__(self, results):
@@ -1200,4 +1200,15 @@ class LoadAnnotationsBEVDepth(object):
         post_rots, post_trans = results['img_inputs'][4:]
         results['img_inputs'] = (imgs, rots, trans, intrins, post_rots,
                                  post_trans, bda_rot)
+        return results
+
+
+@PIPELINES.register_module()
+class KittiSetOrigin:
+    def __init__(self, point_cloud_range):
+        point_cloud_range = np.array(point_cloud_range, dtype=np.float32)
+        self.origin = (point_cloud_range[:3] + point_cloud_range[3:]) / 2.
+
+    def __call__(self, results):
+        results['origin'] = self.origin.copy()
         return results
