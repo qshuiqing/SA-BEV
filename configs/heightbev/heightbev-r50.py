@@ -192,7 +192,7 @@ test_pipeline = [
     dict(
         type='PrepareImageInputs',
         data_config=data_config,
-        sequential=True),
+        sequential=use_sequential),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
