@@ -14,8 +14,7 @@ data_config = {
         'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT',
         'CAM_BACK', 'CAM_BACK_RIGHT'
     ],
-    'Ncams':
-    6,
+    'Ncams': 6,
     'input_size': (256, 704),
     'src_size': (900, 1600),
 
@@ -45,7 +44,7 @@ voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-multi_adj_frame_id_cfg = (1, 1+1, 1)
+multi_adj_frame_id_cfg = (1, 1 + 1, 1)
 
 model = dict(
     type='SABEV',
@@ -80,7 +79,7 @@ model = dict(
         downsample=16),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
-        numC_input=numC_Trans * (len(range(*multi_adj_frame_id_cfg))+1),
+        numC_input=numC_Trans * (len(range(*multi_adj_frame_id_cfg)) + 1),
         num_channels=[numC_Trans * 2, numC_Trans * 4, numC_Trans * 8]),
     img_bev_encoder_neck=dict(
         type='FPN_LSS',
@@ -89,10 +88,10 @@ model = dict(
     pre_process=dict(
         type='CustomResNet',
         numC_input=numC_Trans,
-        num_layer=[2,],
-        num_channels=[numC_Trans,],
-        stride=[1,],
-        backbone_output_ids=[0,]),
+        num_layer=[2, ],
+        num_channels=[numC_Trans, ],
+        stride=[1, ],
+        backbone_output_ids=[0, ]),
     pts_bbox_head=dict(
         type='CenterHead',
         in_channels=256,
@@ -181,8 +180,8 @@ train_pipeline = [
 
 test_pipeline = [
     dict(
-        type='PrepareImageInputs', 
-        data_config=data_config, 
+        type='PrepareImageInputs',
+        data_config=data_config,
         sequential=True),
     dict(
         type='LoadAnnotationsBEVDepth',
@@ -226,14 +225,14 @@ share_data_config = dict(
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file=data_root + 'bevdetv2-nuscenes_infos_val.pkl')
+    ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_val.pkl')
 
 data = dict(
-    samples_per_gpu=4,
-    workers_per_gpu=4,
+    samples_per_gpu=1,
+    workers_per_gpu=1,
     train=dict(
         data_root=data_root,
-        ann_file=data_root + 'bevdetv2-nuscenes_infos_train.pkl',
+        ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
@@ -256,7 +255,7 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=200,
     warmup_ratio=0.001,
-    step=[24,])
+    step=[24, ])
 runner = dict(type='EpochBasedRunner', max_epochs=24)
 
 custom_hooks = [

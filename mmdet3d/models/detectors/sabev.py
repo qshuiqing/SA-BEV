@@ -23,7 +23,7 @@ class SABEV(BEVDepth4D):
         x = self.image_encoder(img)
         bev_feat, img_preds = self.img_view_transformer(
             [x, rot, tran, intrin, post_rot, post_tran, bda, mlp_input, paste_idx, bda_paste])
-        if self.pre_process:
+        if self.pre_process:  # float32->float16
             bev_feat = self.pre_process_net(bev_feat)[0]
         return bev_feat, img_preds
 
@@ -92,7 +92,7 @@ class SABEV(BEVDepth4D):
             key_frame = False
 
         bev_feat = torch.cat(bev_feat_list, dim=1)
-        x = self.bev_encoder(bev_feat)
+        x = self.bev_encoder(bev_feat)  # float16->float32
         return [x], img_preds
 
     def extract_feat(self, points, img, img_metas, **kwargs):

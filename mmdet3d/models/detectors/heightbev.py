@@ -1,4 +1,5 @@
 import torch
+from mmcv.runner import force_fp32
 from mmdet.models import DETECTORS
 from torch.cuda.amp import autocast
 
@@ -18,6 +19,11 @@ class HeightBEV(BEVDepth4D):
         if use_bev_paste:
             self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
 
+    @force_fp32(out_fp16=True)
+    def inner_pre_process(self, bev_feat):
+        bev_feat = self.pre_process_net(bev_feat)[0]  # (bs, 80, 128, 128)
+        return bev_feat
+
     def prepare_bev_feat(self,
                          img,
                          rot,
@@ -34,7 +40,7 @@ class HeightBEV(BEVDepth4D):
         bev_feat, img_preds = self.img_view_transformer(
             [x, rot, tran, intrin, post_rot, post_tran, bda, mlp_input, paste_idx, bda_paste], img_metas)
         if self.pre_process:
-            bev_feat = self.pre_process_net(bev_feat)[0]  # (1, 80, 128, 128)
+            bev_feat = self.inner_pre_process(bev_feat)  # (1, 80, 128, 128)
         return bev_feat, img_preds
 
     def image_encoder(self, img):
@@ -102,7 +108,7 @@ class HeightBEV(BEVDepth4D):
             key_frame = False
 
         bev_feat = torch.cat(bev_feat_list, dim=1)  # (1, 80, 128, 128)
-        x = self.bev_encoder(bev_feat)  # (1, 256, 128, 128)
+        x = self.bev_encoder(bev_feat)  # (1, 256, 128, 128)  float32->float32
         return [x], img_preds
 
     def extract_feat(self, points, img, img_metas, **kwargs):
