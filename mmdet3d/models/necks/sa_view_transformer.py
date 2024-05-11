@@ -160,7 +160,6 @@ class SABEVPool(LSSViewTransformerBEVDepth):
         # self.depth_net = MSCThead(in_channels, mid_channels, self.D, 2, self.out_channels)
         self.depth_threshold = depth_threshold / self.D
         self.semantic_threshold = semantic_threshold
-
     def get_downsampled_gt_depth_and_semantic(self, gt_depths, gt_semantics):
         # remove point not in depth range
         gt_semantics[gt_depths < self.grid_config['depth'][0]] = 0

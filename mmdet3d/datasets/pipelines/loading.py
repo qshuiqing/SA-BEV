@@ -1129,10 +1129,11 @@ class PrepareImageInputs(object):
 @PIPELINES.register_module()
 class LoadAnnotationsBEVDepth(object):
 
-    def __init__(self, bda_aug_conf, classes, is_train=True):
+    def __init__(self,
+                 bda_aug_conf,
+                 is_train=True):
         self.bda_aug_conf = bda_aug_conf
         self.is_train = is_train
-        self.classes = classes
 
     def sample_bda_augmentation(self):
         """Generate bda augmentation values based on bda_config."""

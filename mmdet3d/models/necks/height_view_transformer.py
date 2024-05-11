@@ -4,7 +4,9 @@ import torch
 import torch.nn.functional as F
 from mmcv.runner import BaseModule
 from mmseg.ops import resize
+from torch.cuda.amp import autocast
 
+from .height_net import HeightNet
 from ..builder import NECKS
 
 
@@ -15,6 +17,11 @@ class HeightVT(BaseModule):
                  input_size,
                  n_voxels,
                  voxel_size,
+                 grid_config,
+                 in_channels,
+                 out_channels,
+                 height_threshold=1,
+                 semantic_threshold=0.25,
                  backproject='inplace',
                  multi_scale_3d_scaler='upsample',
                  **kwargs):
@@ -23,9 +30,21 @@ class HeightVT(BaseModule):
         self.input_size = input_size
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
+        self.grid_config = grid_config
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.backproject = backproject
         self.multi_scale_3d_scaler = multi_scale_3d_scaler
 
+        self.H = len(torch.arange(*self.grid_config['height']))  # 10
+        self.height_net = HeightNet(self.in_channels,
+                                    self.in_channels,
+                                    self.out_channels,
+                                    self.H + 2)
+        self.height_threshold = height_threshold / self.H
+        self.semantic_threshold = semantic_threshold
+
+    @autocast(enabled=False)
     def _compute_projection(self, rots, trans, intrinsics, post_rots, post_trans, bda, stride):
         """
         计算前视相机ego坐标系到图像坐标系转换
@@ -51,22 +70,18 @@ class HeightVT(BaseModule):
         cam2keyego[:, :3, 3] = trans
         cam2keyego[:, 3, 3] = 1
 
-        cam2img = rots.new_zeros(N, 4, 4)
-        cam2img[:, :3, :3] = intrinsics
-        cam2img[:, 3, 3] = 1
-
-        post_rt = post_rots.new_zeros(N, 4, 4)
+        post_rt = post_rots.new_zeros(N, 3, 3)
         post_rt[:, :3, :3] = post_rots
         post_rt[:, :3, 2] += post_trans
-        post_rt[:, 3, 3] = 1
 
         bda_mat = rots.new_zeros(N, 4, 4)
         bda_mat[:, :3, :3] = bda
         bda_mat[:, 3, 3] = 1
 
-        keyego2img = post_rt @ cam2img @ cam2keyego.inverse() @ bda_mat.inverse()
+        cam2img = scale @ post_rt @ intrinsics
+        ego2cam = cam2keyego.inverse() @ bda_mat.inverse()
 
-        return scale @ keyego2img[:, :3]
+        return cam2img, ego2cam[:, :3]
 
     def view_transform(self, mlvl_feats, cam_params, img_metas):
         """
@@ -90,7 +105,7 @@ class HeightVT(BaseModule):
                 cam_param_i = [p[batch_id] for p in cam_params]
 
                 # 计算前视相机ego到图像投影矩阵
-                projection = self._compute_projection(*cam_param_i, stride_i)
+                cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
 
                 # 计算前视相机ego下采点
                 n_voxels, voxel_size = self.n_voxels[lvl], self.voxel_size[lvl]
@@ -101,16 +116,16 @@ class HeightVT(BaseModule):
                 ).to(feat_i.device)
 
                 if self.backproject == 'inplace':
-                    volume = backproject_inplace(
-                        feat_i[:, :, :, :], points, projection)  # [c, dz, dy, dx]
+                    volume = self.backproject_inplace(feat_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
                 else:
-                    volume, valid = backproject_vanilla(
-                        feat_i[:, :, :, :], points, projection)
-                    volume = volume.sum(dim=0)
-                    valid = valid.sum(dim=0)
-                    volume = volume / valid
-                    valid = valid > 0
-                    volume[:, ~valid[0]] = 0.0
+                    assert False
+                    # volume, valid = backproject_vanilla(
+                    #     feat_i[:, :, :, :], points, projection)
+                    # volume = volume.sum(dim=0)
+                    # valid = valid.sum(dim=0)
+                    # volume = volume / valid
+                    # valid = valid > 0
+                    # volume[:, ~valid[0]] = 0.0
                 volumes.append(volume)  # bs x (c, dz, dy, dx)
             mlvl_volumes.append(torch.stack(volumes, dim=0))  # lvl x (bs, c, dz, dy, dx)
 
@@ -121,7 +136,7 @@ class HeightVT(BaseModule):
             # (bs, c, dz, dy, dx)->(bs, c*dz, dy, dx)
             mlvl_volume = mlvl_volume.view(bs, c * dz, dy, dx)
 
-            # different x/y, [bs, seq*c*vz, vx, vy] -> [bs, seq*c*vz, vx', vy']
+            # (bs, c*dz, dy, dx) -> (bs, c*dz, dy', dx')
             if self.multi_scale_3d_scaler == 'pool' and i != (len(mlvl_volumes) - 1):
                 # pooling to bottom level
                 mlvl_volume = F.adaptive_avg_pool2d(mlvl_volume, mlvl_volumes[-1].size()[2:4])
@@ -136,20 +151,111 @@ class HeightVT(BaseModule):
                 # same x/y
                 pass
 
-            # [bs, seq*c*vz, vx', vy'] -> [bs, seq*c*vz, vx, vy, 1]
-            # mlvl_volume = mlvl_volume.unsqueeze(-1)
             mlvl_volumes[i] = mlvl_volume
-        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, z1*c1+z2*c2+..., vx, vy, 1]
-
-        # bev_feat = self.neck_3d(mlvl_volumes)
+        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # (bs, c1*dz1+c2*dz2+..., dy, dx)
 
         return mlvl_volumes
 
     def forward(self, img_inputs, img_metas):
-        mlvl_feats = img_inputs[0][0]
+
+        (x, rots, trans, intrins, post_rots, post_trans, bda,
+         mlp_input, paste_idx, bda_paste) = img_inputs[:10]
         cam_params = img_inputs[1:7]
 
-        return self.view_transform([mlvl_feats], cam_params, img_metas), (None, None)
+        # 最后一层高度预测
+        x = x[0]  # (bs, n, c, 32, 88)
+        B, N, C, H, W = x.shape
+        x = x.view(B * N, C, H, W)
+        x = self.height_net(x, mlp_input)
+
+        height_digit = x[:, :self.H, ...]  # (bs*n, 10, 32, 88)
+        semantic_digit = x[:, self.H:self.H + 2]  # (bs*n, 2, 32, 88)
+        tran_feat = x[:, self.H + 2:self.H + 2 + self.out_channels, ...]  # (bs*n, 256, 32, 88)
+
+        height = height_digit.softmax(dim=1)
+        semantic = semantic_digit.softmax(dim=1)
+        kept = (height >= self.height_threshold) * (semantic[:, 1:2] >= self.semantic_threshold)  # (24, 10, 32, 88)
+
+        # (bs*n, 256, 10, 32, 88)
+        tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
+        tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
+
+        return self.view_transform([tran_height_feat], cam_params, img_metas), \
+            (height, semantic)
+
+    def map2bin(self, height):
+        """
+        高度离散化
+        """
+        # [-5, 3, 0.1]
+        # 将height离散化到 [-5, 3, 0.1] 的bin中
+        height = (height - (self.grid_config['height'][0] - self.grid_config['height'][2])) / \
+                 self.grid_config['height'][2]
+        return height.long()
+
+    def backproject_inplace(self, features, ego_coords, cam2img, ego2cam):
+        """
+        function: 2d feature + predefined point cloud -> 3d volume
+        input:
+            features: [6, 256, 10, 32, 88]
+            points: [3, 10, 128, 128]
+            cam2img: [6, 3, 3]
+            ego2cam: [6, 3, 4]
+        output:
+            volume: [256, 10, 128, 128]
+        """
+        n_images, n_channels, n_height, height, width = features.shape
+        n_z_voxels, n_y_voxels, n_x_voxels = ego_coords.shape[-3:]
+        ego_coords = ego_coords.view(1, 3, -1).expand(n_images, 3, -1)
+        ego_coords = torch.cat((ego_coords, torch.ones_like(ego_coords[:, :1])), dim=1)
+
+        # ego to cam
+        cam_coords = torch.bmm(ego2cam, ego_coords)
+        height_bin = self.map2bin(cam_coords[:, 1, :])
+
+        # cam to img
+        points_2d_3 = torch.bmm(cam2img, cam_coords)
+        x = (points_2d_3[:, 0] / points_2d_3[:, 2]).round().long()  # [6, 480000]
+        y = (points_2d_3[:, 1] / points_2d_3[:, 2]).round().long()  # [6, 480000]
+        z = points_2d_3[:, 2]  # [6, 480000]
+        valid = (x >= 0) & (y >= 0) & (x < width) & (y < height) & (z > 0) & (height_bin > 0) & (
+                height_bin < self.H + 1)  # [6, 480000]
+
+        # 特征填充，只填充有效特征，重复特征直接覆盖
+        volume = torch.zeros(
+            (n_channels, ego_coords.shape[-1]), device=features.device
+        ).type_as(features)
+        for i in range(n_images):
+            volume[:, valid[i]] = features[i, :, height_bin[i, valid[i]] - 1, y[i, valid[i]], x[i, valid[i]]]
+
+        volume = volume.view(n_channels, n_z_voxels, n_y_voxels, n_x_voxels)
+        return volume
+
+    def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
+        B, N, _, _ = rot.shape
+        bda = bda.view(B, 1, 3, 3).repeat(1, N, 1, 1)
+        mlp_input = torch.stack([
+            intrin[:, :, 0, 0],
+            intrin[:, :, 1, 1],
+            intrin[:, :, 0, 2],
+            intrin[:, :, 1, 2],
+            post_rot[:, :, 0, 0],
+            post_rot[:, :, 0, 1],
+            post_tran[:, :, 0],
+            post_rot[:, :, 1, 0],
+            post_rot[:, :, 1, 1],
+            post_tran[:, :, 1],
+            bda[:, :, 0, 0],
+            bda[:, :, 0, 1],
+            bda[:, :, 1, 0],
+            bda[:, :, 1, 1],
+            bda[:, :, 2, 2],
+        ],
+            dim=-1)
+        sensor2ego = torch.cat([rot, tran.reshape(B, N, 3, 1)],
+                               dim=-1).reshape(B, N, -1)
+        mlp_input = torch.cat([mlp_input, sensor2ego], dim=-1)
+        return mlp_input
 
 
 @torch.no_grad()
@@ -210,38 +316,3 @@ def backproject_vanilla(features, points, projection):
     # [6, 480000] -> [6, 1, 200, 200, 12]
     valid = valid.view(n_images, 1, n_z_voxels, n_y_voxels, n_x_voxels)
     return volume, valid
-
-
-def backproject_inplace(features, points, projection):
-    '''
-    function: 2d feature + predefined point cloud -> 3d volume
-    input:
-        features: [6, 64, 225, 400]
-        points: [3, 200, 200, 12]
-        projection: [6, 3, 4]
-    output:
-        volume: [64, 200, 200, 12]
-    '''
-    n_images, n_channels, height, width = features.shape
-    n_z_voxels, n_y_voxels, n_x_voxels = points.shape[-3:]
-    # [3, 200, 200, 12] -> [1, 3, 480000] -> [6, 3, 480000]
-    points = points.view(1, 3, -1).expand(n_images, 3, -1)
-    # [6, 3, 480000] -> [6, 4, 480000]
-    points = torch.cat((points, torch.ones_like(points[:, :1])), dim=1)
-    # ego_to_cam
-    # [6, 3, 4] * [6, 4, 480000] -> [6, 3, 480000]
-    points_2d_3 = torch.bmm(projection, points)  # lidar2img
-    x = (points_2d_3[:, 0] / points_2d_3[:, 2]).round().long()  # [6, 480000]
-    y = (points_2d_3[:, 1] / points_2d_3[:, 2]).round().long()  # [6, 480000]
-    z = points_2d_3[:, 2]  # [6, 480000]
-    valid = (x >= 0) & (y >= 0) & (x < width) & (y < height) & (z > 0)  # [6, 480000]
-
-    # method2：特征填充，只填充有效特征，重复特征直接覆盖
-    volume = torch.zeros(
-        (n_channels, points.shape[-1]), device=features.device
-    ).type_as(features)
-    for i in range(n_images):
-        volume[:, valid[i]] = features[i, :, y[i, valid[i]], x[i, valid[i]]]
-
-    volume = volume.view(n_channels, n_z_voxels, n_y_voxels, n_x_voxels)
-    return volume

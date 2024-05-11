@@ -13,11 +13,14 @@ class HeightBEV(BEVDepth4D):
     def __init__(self,
                  use_bev_paste=True,
                  bda_aug_conf=None,
+                 use_depth_supervised=False,
                  **kwargs):
         super(HeightBEV, self).__init__(**kwargs)
         self.use_bev_paste = use_bev_paste
         if use_bev_paste:
             self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
+
+        self.use_depth_supervised = use_depth_supervised
 
     @force_fp32(out_fp16=True)
     def inner_pre_process(self, bev_feat):
@@ -36,9 +39,12 @@ class HeightBEV(BEVDepth4D):
                          paste_idx=None,
                          bda_paste=None,
                          img_metas=None):
+        # (4, 6, 256, 32, 88), (4, 6, 512, 32, 88)
         x = self.image_encoder(img)
-        bev_feat, img_preds = self.img_view_transformer(
+
+        bev_feat, img_preds = self.img_view_transformer(  # HeightVT
             [x, rot, tran, intrin, post_rot, post_tran, bda, mlp_input, paste_idx, bda_paste], img_metas)
+
         if self.pre_process:
             bev_feat = self.inner_pre_process(bev_feat)  # (1, 80, 128, 128)
         return bev_feat, img_preds
@@ -93,10 +99,10 @@ class HeightBEV(BEVDepth4D):
         for img, rot, tran, intrin, post_rot, post_tran in zip(
                 imgs, rots, trans, intrins, post_rots, post_trans):
             if key_frame or self.with_prev:
-                # mlp_input = self.img_view_transformer.get_mlp_input(
-                #     rots[0], trans[0], intrin, post_rot, post_tran, bda)
+                mlp_input = self.img_view_transformer.get_mlp_input(
+                    rots[0], trans[0], intrin, post_rot, post_tran, bda)
                 inputs_curr = (img, rot, tran, intrin, post_rot,
-                               post_tran, bda, None, paste_idx, bda_paste)
+                               post_tran, bda, mlp_input, paste_idx, bda_paste)
                 if key_frame:
                     bev_feat, img_preds = self.prepare_bev_feat(*inputs_curr, img_metas)
                 else:
@@ -115,7 +121,7 @@ class HeightBEV(BEVDepth4D):
         """Extract features from images and points."""
         img_feats, img_preds = self.extract_img_feat(img, img_metas, **kwargs)
         pts_feats = None
-        return (img_feats, pts_feats, img_preds)
+        return img_feats, pts_feats, img_preds
 
     def forward_train(self,
                       points=None,
@@ -153,7 +159,7 @@ class HeightBEV(BEVDepth4D):
         Returns:
             dict: Losses of different branches.
         """
-        if self.use_bev_paste:
+        if self.use_bev_paste:  # False
             B = len(gt_bboxes_3d)
             paste_idx = []
             for i in range(B):
@@ -187,12 +193,13 @@ class HeightBEV(BEVDepth4D):
         img_feats, pts_feats, img_preds = self.extract_feat(
             points, img=img_inputs, img_metas=img_metas, **kwargs)
 
-        # gt_depth = kwargs['gt_depth']
-        # gt_semantic = kwargs['gt_semantic']
-        # loss_depth, loss_semantic = \
-        #     self.img_view_transformer.get_loss(img_preds, gt_depth, gt_semantic)
-        # losses = dict(loss_depth=loss_depth, loss_semantic=loss_semantic)
         losses = dict()
+        if self.use_depth_supervised:  # TODO supervised
+            gt_depth = kwargs['gt_depth']
+            gt_semantic = kwargs['gt_semantic']
+            loss_depth, loss_semantic = \
+                self.img_view_transformer.get_loss(img_preds, gt_depth, gt_semantic)
+            losses = dict(loss_depth=loss_depth, loss_semantic=loss_semantic)
         with autocast(False):
             losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
                                                 gt_labels_3d, img_metas,
