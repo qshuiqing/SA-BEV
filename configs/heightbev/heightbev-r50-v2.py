@@ -41,7 +41,7 @@ voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-with_cp = False
+with_cp = True
 use_bev_paste = False
 use_sequential = False
 n_frame = 1 + 1 if use_sequential else 1
@@ -259,7 +259,7 @@ data['train'].update(share_data_config)
 
 # Optimizer
 optimizer = dict(type='AdamW', lr=2e-4, weight_decay=1e-2)
-optimizer_config = dict(grad_clip=dict(max_norm=5, norm_type=2))
+optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
