@@ -269,7 +269,7 @@ lr_config = dict(
 
 checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 runner = dict(type='EpochBasedRunner', max_epochs=24)
-evaluation = dict(interval=4, pipeline=test_pipeline)
+evaluation = dict(interval=24, pipeline=test_pipeline)
 
 custom_hooks = [
     dict(

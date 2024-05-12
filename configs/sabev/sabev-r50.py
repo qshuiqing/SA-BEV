@@ -169,7 +169,7 @@ train_pipeline = [
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
-        classes=class_names),
+        is_train=True),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
@@ -186,7 +186,6 @@ test_pipeline = [
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
-        classes=class_names,
         is_train=False),
     dict(
         type='LoadPointsFromFile',

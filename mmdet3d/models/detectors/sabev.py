@@ -1,13 +1,10 @@
 import torch
-import torch.nn.functional as F
-import numpy as np
-from mmcv.runner import force_fp32
-
 from mmdet.models import DETECTORS
-from .centerpoint import CenterPoint
-from .bevdet import BEVDepth4D
 from torch.cuda.amp import autocast
+
+from .bevdet import BEVDepth4D
 from ...datasets.pipelines.loading import LoadAnnotationsBEVDepth
+
 
 @DETECTORS.register_module()
 class SABEV(BEVDepth4D):
@@ -16,7 +13,7 @@ class SABEV(BEVDepth4D):
         super(SABEV, self).__init__(**kwargs)
         self.use_bev_paste = use_bev_paste
         if use_bev_paste:
-            self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
+            self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, is_train=True)
 
     def prepare_bev_feat(self, img, rot, tran, intrin, post_rot, post_tran,
                          bda, mlp_input, paste_idx, bda_paste, img_metas=None):
@@ -142,9 +139,9 @@ class SABEV(BEVDepth4D):
             paste_idx = []
             for i in range(B):
                 for j in range(i, i + 1):
-                    if j+1>=B: j-=B
-                    paste_idx.append([i,j+1])
-            
+                    if j + 1 >= B: j -= B
+                    paste_idx.append([i, j + 1])
+
             gt_boxes_paste = []
             gt_labels_paste = []
             bda_mat_paste = []
@@ -157,7 +154,8 @@ class SABEV(BEVDepth4D):
                 gt_boxes_tmp = torch.cat([tmp.tensor for tmp in gt_boxes_tmp], dim=0)
                 gt_labels_tmp = torch.cat(gt_labels_tmp, dim=0)
                 rotate_bda, scale_bda, flip_dx, flip_dy = self.loader.sample_bda_augmentation()
-                gt_boxes_tmp, bda_rot = self.loader.bev_transform(gt_boxes_tmp.cpu(), rotate_bda, scale_bda, flip_dx, flip_dy)
+                gt_boxes_tmp, bda_rot = self.loader.bev_transform(gt_boxes_tmp.cpu(), rotate_bda, scale_bda, flip_dx,
+                                                                  flip_dy)
                 gt_boxes_tmp = gt_bboxes_3d[0].new_box(gt_boxes_tmp.cuda())
                 bda_mat_paste.append(bda_rot.cuda())
                 gt_boxes_paste.append(gt_boxes_tmp)
@@ -166,7 +164,7 @@ class SABEV(BEVDepth4D):
             gt_labels_3d = gt_labels_paste
             img_inputs.append(paste_idx)
             img_inputs.append(torch.stack(bda_mat_paste))
-            
+
         img_feats, pts_feats, img_preds = self.extract_feat(
             points, img=img_inputs, img_metas=img_metas, **kwargs)
 
