@@ -100,7 +100,7 @@ def main():
     checkpoint = torch.load(args.checkpoint)
 
     # 获取你的模型的状态字典
-    model_dict = checkpoint.state_dict()
+    model_dict = checkpoint['state_dict']
 
     # 创建一个新的状态字典，将预训练模型的键修改为你的模型的键
     new_state_dict = {}
@@ -113,10 +113,8 @@ def main():
         new_state_dict[k] = v
 
     # 更新你的模型的状态字典
-    model_dict.update(new_state_dict)
-
-    checkpoint['state_dict'] = model_dict
-    torch.save(checkpoint, args.out)
+    checkpoint['state_dict'] = new_state_dict
+    # torch.save(checkpoint, args.out)
 
 
 if __name__ == '__main__':
