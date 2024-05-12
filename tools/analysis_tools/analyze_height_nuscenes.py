@@ -1,46 +1,25 @@
+import csv
+
+import numpy as np
+import pandas as pd
 from nuscenes import NuScenes
 from tqdm import tqdm
-
-NameMapping = {
-    'movable_object.barrier': 'barrier',
-    'vehicle.bicycle': 'bicycle',
-    'vehicle.bus.bendy': 'bus',
-    'vehicle.bus.rigid': 'bus',
-    'vehicle.car': 'car',
-    'vehicle.construction': 'construction_vehicle',
-    'vehicle.motorcycle': 'motorcycle',
-    'human.pedestrian.adult': 'pedestrian',
-    'human.pedestrian.child': 'pedestrian',
-    'human.pedestrian.construction_worker': 'pedestrian',
-    'human.pedestrian.police_officer': 'pedestrian',
-    'movable_object.trafficcone': 'traffic_cone',
-    'vehicle.trailer': 'trailer',
-    'vehicle.truck': 'truck'
-}
-filter_lidarseg_classes = tuple(NameMapping.keys())
-
-class_names = (
-    'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
-    'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
-)
-class_idx = dict()
-for i, name in enumerate(class_names):
-    class_idx[name] = i
-
-camera_names = (
-    'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT',
-    'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_FRONT_LEFT'
-)
 
 
 def generate():
     dataroot = r'data/nuscenes'
     nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=False)
-    filter_lidarseg_labels = []
-    for class_name in filter_lidarseg_classes:
-        filter_lidarseg_labels.append(nusc.lidarseg_name2idx_mapping[class_name])
 
-    height = []
+    def update_dict(d, key):
+        if key in d:
+            d[key] += 1
+        else:
+            if key < 0:
+                d[key - 1] = 1
+            else:
+                d[key] = 1
+
+    height = {}
     for i, sample in tqdm(enumerate(nusc.sample)):
 
         camera_data = {}
@@ -59,8 +38,37 @@ def generate():
             _, boxes, _ = nusc.get_sample_data(sd_token)
 
             for box in boxes:
-                height.append(box.center[1])
+                update_dict(height, box.center[1].astype(np.int64))
+
+    # 保存 height 分布
+    with open('height_dis.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        for key, value in height.items():
+            writer.writerow([key, value])
+
+
+def dis_heatmap():
+    import matplotlib.pyplot as plt
+
+    # 假设这是你的字典
+    df = pd.read_csv('height_dis.csv', header=None, names=['key', 'value'])
+    df = df.sort_values(by='key', ascending=False)
+
+    # 将字典转换为列表，以便于绘图
+    keys = list(df['key'].tolist())
+    values = list(df['value'].tolist())
+
+    # 创建柱状图
+    plt.bar(keys, values)
+
+    # 添加标题和标签
+    plt.title('Key-Value Bar Chart')
+    plt.xlabel('Keys')
+    plt.ylabel('Values')
+
+    # 显示柱状图
+    plt.show()
 
 
 if __name__ == '__main__':
-    generate()
+    dis_heatmap()
