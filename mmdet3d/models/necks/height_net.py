@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import build_conv_layer
+from mmcv.runner import force_fp32
 from mmdet.models.backbones.resnet import BasicBlock
 from torch.cuda.amp.autocast_mode import autocast
 from torch.utils.checkpoint import checkpoint
@@ -208,6 +209,9 @@ class HeightNet(nn.Module):
                 padding=0))
         self.depth_conv = nn.Sequential(*depth_conv_list)
 
+        self.fp16_enabled = False
+
+    @force_fp32(apply_to=('x',))
     def forward(self, x, mlp_input):
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
         x = self.reduce_conv(x)
