@@ -1,4 +1,5 @@
 import csv
+import os
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,38 @@ def generate():
             writer.writerow([key, value])
 
 
+def generate_height_from_lidar():
+    def update_dict(d, k):
+        if k in d:
+            d[k] += 1
+        else:
+            if k < 0:
+                d[k - 1] = 1
+            else:
+                d[k] = 1
+
+    height = {}
+    for root, dirs, files in tqdm(os.walk('data/nuscenes/samples_point_label')):
+        for file in files:
+            if file.endswith('.npy'):
+                data = np.load(os.path.join(root, file)).astype(np.float64)[:5].T
+                # 过滤超过图片的点
+                coords = data[:, :2].astype(np.int16)
+                valid_mask = ((coords[:, 1] < 900)
+                              & (coords[:, 0] < 1600)
+                              & (coords[:, 1] >= 0)
+                              & (coords[:, 0] >= 0))
+                height_data = data[valid_mask, 4]
+                for _h in height_data:
+                    update_dict(height, _h.astype(np.int64))
+
+    # 保存 height 分布
+    with open('height_dis_lidar.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        for key, value in height.items():
+            writer.writerow([key, value])
+
+
 def dis_heatmap():
     import matplotlib.pyplot as plt
 
@@ -71,4 +104,4 @@ def dis_heatmap():
 
 
 if __name__ == '__main__':
-    dis_heatmap()
+    generate_height_from_lidar()
