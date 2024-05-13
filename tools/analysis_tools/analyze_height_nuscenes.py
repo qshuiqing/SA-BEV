@@ -59,8 +59,8 @@ def generate_height_from_lidar():
                 d[k] = 1
 
     height = {}
-    for root, dirs, files in tqdm(os.walk('data/nuscenes/samples_point_label')):
-        for file in files:
+    for root, dirs, files in os.walk('data/nuscenes/samples_point_label'):
+        for file in tqdm(files):
             if file.endswith('.npy'):
                 data = np.load(os.path.join(root, file)).astype(np.float64)[:5].T
                 # 过滤超过图片的点
@@ -84,7 +84,7 @@ def dis_heatmap():
     import matplotlib.pyplot as plt
 
     # 假设这是你的字典
-    df = pd.read_csv('height_dis.csv', header=None, names=['key', 'value'])
+    df = pd.read_csv('height_dis_lidar.csv', header=None, names=['key', 'value'])
     df = df.sort_values(by='key', ascending=False)
 
     # 将字典转换为列表，以便于绘图
@@ -104,4 +104,4 @@ def dis_heatmap():
 
 
 if __name__ == '__main__':
-    generate_height_from_lidar()
+    dis_heatmap()

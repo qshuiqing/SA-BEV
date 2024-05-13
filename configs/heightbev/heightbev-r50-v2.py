@@ -28,7 +28,7 @@ data_config = {
 
 # Model
 grid_config = {
-    'height': [-5.0, 3.0, 0.8],  # 10
+    'height': [-3.0, 3.0, 0.6],  # 10
 }
 
 bda_aug_conf = dict(
@@ -281,4 +281,4 @@ custom_hooks = [
     ),
 ]
 
-fp16 = dict(loss_scale='dynamic')
+# fp16 = dict(loss_scale='dynamic')
