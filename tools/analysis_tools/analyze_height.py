@@ -3,6 +3,7 @@ import argparse
 
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 from mmcv import Config
 from mmcv.parallel import MMDataParallel
 from mmcv.runner import load_checkpoint
@@ -51,8 +52,8 @@ def main():
         shuffle=False)
 
     # build the model and load checkpoint
-    if not args.no_acceleration:
-        cfg.model.img_view_transformer.accelerate = True
+    # if not args.no_acceleration:
+    #     cfg.model.img_view_transformer.accelerate = True
     cfg.model.train_cfg = None
     model = build_detector(cfg.model, test_cfg=cfg.get('test_cfg'))
     load_checkpoint(model, args.checkpoint, map_location='cpu')
@@ -60,17 +61,19 @@ def main():
 
     model.eval()
 
-    semantic_threshold = model.module.img_view_transformer.semantic_threshold
+    semantic_threshold = model.module.img_view_transformer.semantic_threshold  # 0.25
     for i, data in enumerate(tqdm(data_loader)):
         with torch.no_grad():
             img_inputs = [it.cuda() for it in data['img_inputs'][0]]
-            _, img_preds = model.module.extract_img_feat(img_inputs, data['img_metas'][0])
-            height, semantic = img_preds
+            _, img_preds = model.module.extract_img_feat(img_inputs, data['img_metas'][0].data[0])
+            height_digit, semantic = img_preds
 
-            height = [h.cpu().numpy() for h in img_preds[2].softmax(1).argmax(1)]
+            height = [h.cpu().numpy() for h in height_digit.softmax(1).argmax(1)]
             canvas = [cvs[0].numpy() for cvs in data['canvas'][0]]
 
             kept = (semantic[:, 1:2] >= semantic_threshold)  # (6, 1, 32, 88)
+            kept = F.interpolate(kept.float(), size=(256, 704), mode='nearest').bool()
+            kept = kept.permute(0, 2, 3, 1).cpu().numpy()
 
             fig, axs = plt.subplots(6, 3, figsize=(15, 15))
             for cam_id in range(6):

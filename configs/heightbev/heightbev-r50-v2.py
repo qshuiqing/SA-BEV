@@ -214,7 +214,7 @@ test_pipeline = [
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
                 with_label=False),
-            dict(type='Collect3D', keys=['img_inputs'])
+            dict(type='Collect3D', keys=['img_inputs', 'canvas'])
         ])
 ]
 
