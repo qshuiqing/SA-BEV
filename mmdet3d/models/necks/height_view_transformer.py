@@ -170,26 +170,30 @@ class HeightVT(BaseModule):
          mlp_input, paste_idx, bda_paste) = img_inputs[:10]
         cam_params = img_inputs[1:7]
 
-        # 最后一层高度预测
-        x = x[0]  # (bs, n, c, 32, 88)
-        B, N, C, H, W = x.shape
-        x = x.view(B * N, C, H, W)
-        x = self.height_net(x, mlp_input)
+        hs = tuple()
+        tran_height_feats = list()
+        for lvl, mlvl_feat in enumerate(x):
+            # 最后一层高度预测
+            x = mlvl_feat  # (bs, n, c, 32, 88)
+            B, N, C, H, W = x.shape
+            x = x.view(B * N, C, H, W)
+            x = self.height_net(x, mlp_input)
 
-        height_digit = x[:, :self.H, ...]  # (bs*n, 10, 32, 88)
-        semantic_digit = x[:, self.H:self.H + 2]  # (bs*n, 2, 32, 88)
-        tran_feat = x[:, self.H + 2:self.H + 2 + self.out_channels, ...]  # (bs*n, 256, 32, 88)
+            height_digit = x[:, :self.H, ...]  # (bs*n, 10, 32, 88)
+            semantic_digit = x[:, self.H:self.H + 2]  # (bs*n, 2, 32, 88)
+            tran_feat = x[:, self.H + 2:self.H + 2 + self.out_channels, ...]  # (bs*n, 256, 32, 88)
+            hs = (height_digit, semantic_digit) + hs
 
-        height = height_digit.softmax(dim=1)
-        semantic = semantic_digit.softmax(dim=1)
-        kept = (height >= self.height_threshold) * (semantic[:, 1:2] >= self.semantic_threshold)  # (24, 10, 32, 88)
+            height = height_digit.softmax(dim=1)
+            semantic = semantic_digit.softmax(dim=1)
+            kept = (height >= self.height_threshold) * (semantic[:, 1:2] >= self.semantic_threshold)  # (24, 10, 32, 88)
 
-        # (bs*n, 256, 10, 32, 88)
-        tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
-        tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
+            # (bs*n, 256, 10, 32, 88)
+            tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
+            tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
+            tran_height_feats.append(tran_height_feat)
 
-        return self.view_transform([tran_height_feat], cam_params, img_metas), \
-            (height, semantic)
+        return self.view_transform(tran_height_feats, cam_params, img_metas), hs
 
     def get_downsampled_gt_height_and_semantic(self, gt_heights, gt_semantics):
         # remove point not in height range
@@ -310,11 +314,25 @@ class HeightVT(BaseModule):
         return self.loss_height_weight * height_loss, self.loss_semantic_weight * semantic_loss
 
     def get_loss(self, img_preds, gt_height, gt_semantic):
-        height, semantic = img_preds
+        # (16, 44) -> (32, 88)
+        height0 = F.interpolate(img_preds[0], scale_factor=2, mode='bilinear').softmax(1)
+        semantic0 = F.interpolate(img_preds[1], scale_factor=2, mode='bilinear').softmax(1)
+
+        height1 = img_preds[2].softmax(1)
+        semantic1 = img_preds[3].softmax(1)
+
+        # 下采样 height & semantic 标签
         height_labels, semantic_labels = \
             self.get_downsampled_gt_height_and_semantic(gt_height, gt_semantic)
-        loss_height, loss_semantic = \
-            self.get_height_and_semantic_loss(height_labels, height, semantic_labels, semantic)
+
+        # 计算多尺度 height & semantic 损失
+        loss_height0, loss_semantic0 = \
+            self.get_height_and_semantic_loss(height_labels, height0, semantic_labels, semantic0)
+        loss_height1, loss_semantic1 = \
+            self.get_height_and_semantic_loss(height_labels, height1, semantic_labels, semantic1)
+        loss_height = (loss_height0 + loss_height1) / 2
+        loss_semantic = (loss_semantic0 + loss_semantic1) / 2
+
         return loss_height, loss_semantic
 
     def map2bin(self, height):

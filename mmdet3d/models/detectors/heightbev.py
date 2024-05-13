@@ -1,6 +1,8 @@
 import torch
 from mmcv.runner import force_fp32
 from mmdet.models import DETECTORS
+from mmseg.ops import resize
+from torch import nn
 from torch.cuda.amp import autocast
 
 from .bevdet import BEVDepth4D
@@ -14,6 +16,7 @@ class HeightBEV(BEVDepth4D):
                  use_bev_paste=True,
                  bda_aug_conf=None,
                  use_depth_supervised=False,
+                 img_neck_fuse=None,
                  **kwargs):
         super(HeightBEV, self).__init__(**kwargs)
         self.use_bev_paste = use_bev_paste
@@ -21,6 +24,13 @@ class HeightBEV(BEVDepth4D):
             self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
 
         self.use_depth_supervised = use_depth_supervised
+
+        self.num_layer = len(img_neck_fuse['in_channels'])
+        for i, (in_channels, out_channels) in enumerate(
+                zip(img_neck_fuse['in_channels'], img_neck_fuse['out_channels'])):
+            self.add_module(
+                f'neck_fuse_{i}',
+                nn.Conv2d(in_channels, out_channels, 3, 1, 1))
 
     @force_fp32(out_fp16=True)
     def inner_pre_process(self, bev_feat):
@@ -53,15 +63,36 @@ class HeightBEV(BEVDepth4D):
         imgs = img
         B, N, C, imH, imW = imgs.shape
         imgs = imgs.view(B * N, C, imH, imW)
-        x = list(self.img_backbone(imgs))
-        if self.with_img_neck:
-            x[1] = self.img_neck(x)
-            if type(x) in [list, tuple]:
-                x = x[:2]
-        for i in range(2):
-            _, output_dim, ouput_H, output_W = x[i].shape
-            x[i] = x[i].view(B, N, output_dim, ouput_H, output_W)
-        return x[:2][::-1]
+        mlvl_feats = list(self.img_neck(self.img_backbone(imgs)))
+
+        mlvl_feats_ = []
+        for msid in range(self.num_layer):
+            # fpn output fusion
+            if getattr(self, f'neck_fuse_{msid}', None) is not None:
+                fuse_feats = [mlvl_feats[msid]]
+                for i in range(msid + 1, len(mlvl_feats)):
+                    resized_feat = resize(
+                        mlvl_feats[i],
+                        size=mlvl_feats[msid].size()[2:],
+                        mode="bilinear",
+                        align_corners=False)
+                    fuse_feats.append(resized_feat)
+
+                if len(fuse_feats) > 1:
+                    fuse_feats = torch.cat(fuse_feats, dim=1)
+                else:
+                    fuse_feats = fuse_feats[0]
+                fuse_feats = getattr(self, f'neck_fuse_{msid}')(fuse_feats)
+                mlvl_feats_.append(fuse_feats)
+            else:
+                mlvl_feats_.append(mlvl_feats[msid])
+        mlvl_feats = mlvl_feats_
+
+        for i in range(len(mlvl_feats)):
+            _, output_dim, ouput_H, output_W = mlvl_feats[i].shape
+            mlvl_feats[i] = mlvl_feats[i].view(B, N, output_dim, ouput_H, output_W)
+
+        return mlvl_feats
 
     def prepare_inputs(self, inputs):
         # split the inputs into each frame
@@ -194,7 +225,7 @@ class HeightBEV(BEVDepth4D):
             points, img=img_inputs, img_metas=img_metas, **kwargs)
 
         losses = dict()
-        if self.use_depth_supervised:  # TODO supervised
+        if self.use_depth_supervised:
             gt_height = kwargs['gt_height']
             gt_semantic = kwargs['gt_semantic']
             loss_depth, loss_semantic = \
