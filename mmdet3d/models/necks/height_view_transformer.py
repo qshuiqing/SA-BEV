@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from mmcv.runner import BaseModule
+from mmcv.runner import BaseModule, force_fp32
 from mmseg.ops import resize
 from torch.cuda.amp import autocast
 
@@ -20,8 +20,11 @@ class HeightVT(BaseModule):
                  grid_config,
                  in_channels,
                  out_channels,
+                 downsample,
                  height_threshold=1,
                  semantic_threshold=0.25,
+                 loss_height_weight=3,
+                 loss_semantic_weight=25,
                  backproject='inplace',
                  multi_scale_3d_scaler='upsample',
                  **kwargs):
@@ -33,6 +36,7 @@ class HeightVT(BaseModule):
         self.grid_config = grid_config
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.downsample = downsample
         self.backproject = backproject
         self.multi_scale_3d_scaler = multi_scale_3d_scaler
 
@@ -43,6 +47,10 @@ class HeightVT(BaseModule):
                                     self.H + 2)
         self.height_threshold = height_threshold / self.H
         self.semantic_threshold = semantic_threshold
+        self.loss_height_weight = loss_height_weight
+        self.loss_semantic_weight = loss_semantic_weight
+
+        # self.fp16_enabled = False
 
     @autocast(enabled=False)
     def _compute_projection(self, rots, trans, intrinsics, post_rots, post_trans, bda, stride):
@@ -182,6 +190,132 @@ class HeightVT(BaseModule):
 
         return self.view_transform([tran_height_feat], cam_params, img_metas), \
             (height, semantic)
+
+    def get_downsampled_gt_height_and_semantic(self, gt_heights, gt_semantics):
+        # remove point not in height range
+        gt_semantics[gt_heights < self.grid_config['height'][0]] = 0
+        gt_semantics[gt_heights > self.grid_config['height'][1]] = 0
+        gt_heights[gt_heights < self.grid_config['height'][0]] = 0
+        gt_heights[gt_heights > self.grid_config['height'][1]] = 0
+        gt_semantic_heights = gt_heights * gt_semantics
+
+        # 语义下采样
+        B, N, H, W = gt_semantics.shape
+        gt_semantics = gt_semantics.view(
+            B * N,
+            H // self.downsample,
+            self.downsample,
+            W // self.downsample,
+            self.downsample,
+            1,
+        )
+        gt_semantics = gt_semantics.permute(0, 1, 3, 5, 2, 4).contiguous()
+        gt_semantics = gt_semantics.view(
+            -1, self.downsample * self.downsample)
+        gt_semantics = torch.max(gt_semantics, dim=-1).values
+        gt_semantics = gt_semantics.view(B * N, H // self.downsample,
+                                         W // self.downsample)
+        gt_semantics = F.one_hot(gt_semantics.long(),
+                                 num_classes=2).view(-1, 2).float()
+
+        # 高度下采样
+        B, N, H, W = gt_heights.shape
+        gt_heights = gt_heights.view(
+            B * N,
+            H // self.downsample,
+            self.downsample,
+            W // self.downsample,
+            self.downsample,
+            1,
+        )
+        gt_heights = gt_heights.permute(0, 1, 3, 5, 2, 4).contiguous()
+        gt_heights = gt_heights.view(
+            -1, self.downsample * self.downsample)
+        gt_heights_tmp = torch.where(gt_heights == 0.0,
+                                     1e5 * torch.ones_like(gt_heights),
+                                     gt_heights)
+        gt_heights = torch.min(gt_heights_tmp, dim=-1).values
+        gt_heights = gt_heights.view(B * N, H // self.downsample,
+                                     W // self.downsample)
+        gt_heights = (gt_heights -
+                      (self.grid_config['height'][0] - self.grid_config['height'][2])) / self.grid_config['height'][2]
+        gt_heights = torch.where(
+            (gt_heights < self.H + 1) & (gt_heights >= 0.0),
+            gt_heights, torch.zeros_like(gt_heights))
+        gt_heights = F.one_hot(gt_heights.long(),
+                               num_classes=self.H + 1).view(
+            -1, self.H + 1)[:, 1:].float()
+
+        # 语义高度下采样
+        gt_semantic_heights = gt_semantic_heights.view(
+            B * N,
+            H // self.downsample,
+            self.downsample,
+            W // self.downsample,
+            self.downsample,
+            1,
+        )
+        gt_semantic_heights = gt_semantic_heights.permute(0, 1, 3, 5, 2, 4).contiguous()
+        gt_semantic_heights = gt_semantic_heights.view(
+            -1, self.downsample * self.downsample)
+        gt_semantic_heights = torch.where(gt_semantic_heights == 0.0,
+                                          1e5 * torch.ones_like(gt_semantic_heights),
+                                          gt_semantic_heights)
+        gt_semantic_heights = (gt_semantic_heights - (self.grid_config['height'][0] -
+                                                      self.grid_config['height'][2])) / self.grid_config['height'][2]
+        gt_semantic_heights = torch.where(
+            (gt_semantic_heights < self.H + 1) & (gt_semantic_heights >= 0.0),
+            gt_semantic_heights, torch.zeros_like(gt_semantic_heights)).long()
+        soft_height_mask = gt_semantics[:, 1] > 0
+        gt_semantic_heights = gt_semantic_heights[soft_height_mask]
+        gt_semantic_heights_cnt = gt_semantic_heights.new_zeros([gt_semantic_heights.shape[0], self.H + 1])
+        for i in range(self.H + 1):
+            gt_semantic_heights_cnt[:, i] = (gt_semantic_heights == i).sum(dim=-1)
+        gt_semantic_heights = gt_semantic_heights_cnt[:, 1:] / gt_semantic_heights_cnt[:, 1:].sum(dim=-1, keepdim=True)
+        gt_heights[soft_height_mask] = gt_semantic_heights
+
+        return gt_heights, gt_semantics
+
+    @force_fp32()
+    def get_height_and_semantic_loss(self, height_labels, height_preds, semantic_labels, semantic_preds):
+        height_preds = height_preds.permute(0, 2, 3, 1).contiguous().view(-1, self.H)
+        semantic_preds = semantic_preds.permute(0, 2, 3, 1).contiguous().view(-1, 2)
+        semantic_weight = torch.zeros_like(semantic_labels[:, 1:2])
+        semantic_weight = torch.fill_(semantic_weight, 0.1)
+        semantic_weight[semantic_labels[:, 1] > 0] = 0.9
+
+        height_mask = torch.max(height_labels, dim=1).values > 0.0
+        height_labels = height_labels[height_mask]
+        height_preds = height_preds[height_mask]
+        semantic_labels = semantic_labels[height_mask]
+        semantic_preds = semantic_preds[height_mask]
+        semantic_weight = semantic_weight[height_mask]
+
+        with autocast(enabled=False):
+            height_loss = (F.binary_cross_entropy(
+                height_preds,
+                height_labels,
+                reduction='none',
+            ) * semantic_weight).sum() / max(0.1, semantic_weight.sum())
+
+            pred = semantic_preds
+            target = semantic_labels
+            alpha = 0.25
+            gamma = 2
+            pt = (1 - pred) * target + pred * (1 - target)
+            focal_weight = (alpha * target + (1 - alpha) *
+                            (1 - target)) * pt.pow(gamma)
+            semantic_loss = F.binary_cross_entropy(pred, target, reduction='none') * focal_weight
+            semantic_loss = semantic_loss.sum() / max(1, len(semantic_loss))
+        return self.loss_height_weight * height_loss, self.loss_semantic_weight * semantic_loss
+
+    def get_loss(self, img_preds, gt_height, gt_semantic):
+        height, semantic = img_preds
+        height_labels, semantic_labels = \
+            self.get_downsampled_gt_height_and_semantic(gt_height, gt_semantic)
+        loss_height, loss_semantic = \
+            self.get_height_and_semantic_loss(height_labels, height, semantic_labels, semantic)
+        return loss_height, loss_semantic
 
     def map2bin(self, height):
         """

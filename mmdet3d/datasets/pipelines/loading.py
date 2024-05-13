@@ -878,17 +878,21 @@ class PrepareImageInputs(object):
 
         coords = point_label[:, :2].astype(np.int16)
 
-        depth_map = np.zeros(resize_dims)
         valid_mask = ((coords[:, 1] < resize_dims[0])
                       & (coords[:, 0] < resize_dims[1])
                       & (coords[:, 1] >= 0)
                       & (coords[:, 0] >= 0))
-        depth_map[coords[valid_mask, 1],
-        coords[valid_mask, 0]] = point_label[valid_mask, 2]
+
+        depth_map = np.zeros(resize_dims)
+        depth_map[coords[valid_mask, 1], coords[valid_mask, 0]] = point_label[valid_mask, 2]
+
         semantic_map = np.zeros(resize_dims)
-        semantic_map[coords[valid_mask, 1],
-        coords[valid_mask, 0]] = (point_label[valid_mask, 3] >= 0)
-        return torch.Tensor(depth_map), torch.Tensor(semantic_map)
+        semantic_map[coords[valid_mask, 1], coords[valid_mask, 0]] = (point_label[valid_mask, 3] >= 0)
+
+        height_map = np.zeros(resize_dims)
+        height_map[coords[valid_mask, 1], coords[valid_mask, 0]] = point_label[valid_mask, 4]
+
+        return torch.Tensor(depth_map), torch.Tensor(semantic_map), torch.Tensor(height_map)
 
     def choose_cams(self):
         if self.is_train and self.data_config['Ncams'] < len(
@@ -1008,6 +1012,7 @@ class PrepareImageInputs(object):
         post_trans = []
         gt_depth = []
         gt_semantic = []
+        gt_height = []
         cam_names = self.choose_cams()
         results['cam_names'] = cam_names
         canvas = []
@@ -1016,8 +1021,6 @@ class PrepareImageInputs(object):
             cam_data = results['curr']['cams'][cam_name]
             filename = cam_data['data_path']
             img = Image.open(filename)
-            post_rot = torch.eye(2)
-            post_tran = torch.zeros(2)
 
             intrin = torch.Tensor(cam_data['cam_intrinsic'])
 
@@ -1033,25 +1036,13 @@ class PrepareImageInputs(object):
                 H=img.height, W=img.width, flip=flip, scale=scale)
             resize, resize_dims, crop, flip, rotate = img_augs
             img, post_rot2, post_tran2 = \
-                self.img_transform(img, post_rot,
-                                   post_tran,
+                self.img_transform(img, torch.eye(2),
+                                   torch.zeros(2),
                                    resize=resize,
                                    resize_dims=resize_dims,
                                    crop=crop,
                                    flip=flip,
                                    rotate=rotate)
-
-            if self.load_point_label:
-                point_filename = filename.replace('samples/', 'samples_point_label/'
-                                                  ).replace('.jpg', '.npy')
-                point_label = np.load(point_filename).astype(np.float64)[:4].T
-                point_depth_augmented, point_semantic_augmented = \
-                    self.point_label_transform(
-                        point_label, resize, self.data_config['input_size'],
-                        crop, flip, rotate)
-                gt_depth.append(point_depth_augmented)
-                gt_semantic.append(point_semantic_augmented)
-
             # for convenience, make augmentation matrices 3x3
             post_tran = torch.zeros(3)
             post_rot = torch.eye(3)
@@ -1060,6 +1051,18 @@ class PrepareImageInputs(object):
 
             canvas.append(np.array(img))
             imgs.append(self.normalize_img(img))
+
+            if self.load_point_label:
+                point_filename = filename.replace('samples/', 'samples_point_label/'
+                                                  ).replace('.jpg', '.npy')
+                point_label = np.load(point_filename).astype(np.float64)[:5].T
+                point_depth_augmented, point_semantic_augmented, point_height_augmented = \
+                    self.point_label_transform(
+                        point_label, resize, self.data_config['input_size'],
+                        crop, flip, rotate)
+                gt_depth.append(point_depth_augmented)
+                gt_semantic.append(point_semantic_augmented)
+                gt_height.append(point_height_augmented)
 
             if self.sequential:
                 assert 'adjacent' in results
@@ -1114,12 +1117,16 @@ class PrepareImageInputs(object):
         sensor2sensors = torch.stack(sensor2sensors)
         results['canvas'] = canvas
         results['sensor2sensors'] = sensor2sensors
+
         if self.load_point_label:
             gt_depth = torch.stack(gt_depth)
             gt_semantic = torch.stack(gt_semantic)
+            gt_height = torch.stack(gt_height)
             results['gt_depth'] = gt_depth
             results['gt_semantic'] = gt_semantic
-        return (imgs, rots, trans, intrins, post_rots, post_trans)
+            results['gt_height'] = gt_height
+
+        return imgs, rots, trans, intrins, post_rots, post_trans
 
     def __call__(self, results):
         results['img_inputs'] = self.get_inputs(results)

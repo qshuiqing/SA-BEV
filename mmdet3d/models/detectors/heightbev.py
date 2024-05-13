@@ -195,10 +195,10 @@ class HeightBEV(BEVDepth4D):
 
         losses = dict()
         if self.use_depth_supervised:  # TODO supervised
-            gt_depth = kwargs['gt_depth']
+            gt_height = kwargs['gt_height']
             gt_semantic = kwargs['gt_semantic']
             loss_depth, loss_semantic = \
-                self.img_view_transformer.get_loss(img_preds, gt_depth, gt_semantic)
+                self.img_view_transformer.get_loss(img_preds, gt_height, gt_semantic)
             losses = dict(loss_depth=loss_depth, loss_semantic=loss_semantic)
         with autocast(False):
             losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,

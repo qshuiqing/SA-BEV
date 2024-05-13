@@ -51,6 +51,7 @@ model = dict(
     type='HeightBEV',
     use_bev_paste=use_bev_paste,
     bda_aug_conf=bda_aug_conf,
+    use_depth_supervised=True,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     img_backbone=dict(
         type='ResNet',
@@ -74,6 +75,7 @@ model = dict(
         type='HeightVT',
         in_channels=256,
         out_channels=256,
+        downsample=8,
         grid_config=grid_config,
         input_size=data_config['input_size'],
         n_voxels=[  # TODO multi-voxels
@@ -175,7 +177,7 @@ train_pipeline = [
         data_config=data_config,
         is_train=True,
         sequential=use_sequential,
-        load_point_label=False,
+        load_point_label=True,
     ),
     dict(
         type='LoadAnnotationsBEVDepth',
@@ -187,7 +189,7 @@ train_pipeline = [
     dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
-        type='Collect3D', keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d'])
+        type='Collect3D', keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_semantic', 'gt_height'])
 ]
 
 test_pipeline = [
