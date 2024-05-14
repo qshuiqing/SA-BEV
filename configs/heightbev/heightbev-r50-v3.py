@@ -85,8 +85,8 @@ model = dict(
             # [128, 128, 6],  # 16x
         ],
         voxel_size=[
-            [0.4, 0.4, 0.8],  # 4x
-            [8 / 15, 8 / 15, 0.8],  # 8x
+            [0.4, 0.4, 0.6],  # 4x
+            [8 / 15, 8 / 15, 0.6],  # 8x
             # [0.8, 0.8, 1.0],  # 16x
         ],
     ),
@@ -294,7 +294,7 @@ custom_hooks = [
         type='MEGVIIEMAHook',
         init_updates=10560,
         priority='NORMAL',
-        resume='work_dirs/heightbev-r50-v3/epoch_4_ema.pth'
+        # resume='work_dirs/heightbev-r50-v3/epoch_4_ema.pth'
     ),
 ]
 
