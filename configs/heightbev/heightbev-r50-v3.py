@@ -261,14 +261,29 @@ for key in ['val', 'test']:
 data['train'].update(share_data_config)
 
 # Optimizer
-optimizer = dict(type='AdamW', lr=2e-4, weight_decay=1e-2)
+# optimizer = dict(type='AdamW', lr=2e-4, weight_decay=1e-2)
+optimizer = dict(
+    type='AdamW',
+    lr=2e-5,
+    weight_decay=1e-2,
+    paramwise_cfg=dict(
+        custom_keys={'img_backbone': dict(lr_mult=0.1, decay_mult=1.0)}))
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
-    policy='step',
+    policy='poly',
     warmup='linear',
-    warmup_iters=200,
-    warmup_ratio=0.001,
-    step=[24, ])
+    warmup_iters=1000,
+    warmup_ratio=1e-6,
+    power=1.0,
+    min_lr=0,
+    by_epoch=False
+)
+# lr_config = dict(
+#     policy='step',
+#     warmup='linear',
+#     warmup_iters=200,
+#     warmup_ratio=0.001,
+#     step=[24, ])
 
 checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 runner = dict(type='EpochBasedRunner', max_epochs=24)
@@ -279,6 +294,7 @@ custom_hooks = [
         type='MEGVIIEMAHook',
         init_updates=10560,
         priority='NORMAL',
+        resume='work_dirs/heightbev-r50-v3/epoch_4_ema.pth'
     ),
 ]
 
