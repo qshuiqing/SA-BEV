@@ -2,8 +2,10 @@ import math
 
 import torch
 import torch.nn.functional as F
+from einops import repeat
 from mmcv.runner import BaseModule, force_fp32
 from mmseg.ops import resize
+from torch import nn
 from torch.cuda.amp import autocast
 
 from .height_net import HeightNet
@@ -450,3 +452,77 @@ def backproject_vanilla(features, points, projection):
     # [6, 480000] -> [6, 1, 200, 200, 12]
     valid = valid.view(n_images, 1, n_z_voxels, n_y_voxels, n_x_voxels)
     return volume, valid
+
+
+class SampledCoordSelector(nn.Module):
+    """前视相机ego坐标系中采点
+    """
+
+    def __init__(self,
+                 pc_range,
+                 grid_config,
+                 sampled_kwargs):
+        super(SampledCoordSelector, self).__init__()
+
+        self.pc_range = pc_range
+        self.grid_config = grid_config
+
+        # Init
+        self._init_status(sampled_kwargs)
+        self._init_buffer()
+
+    def _init_status(self, sampled_kwargs):
+        # Coarse
+        self.n_coarse = sampled_kwargs['n_coarse']
+
+        # Fine
+        self.n_fine = sampled_kwargs['n_fine']
+
+    def _init_buffer(self):
+        X, Y, H = self.grid_config
+        grid = torch.stack(  # (Y, X, 2)
+            torch.meshgrid(
+                torch.linspace(0, 1, X), torch.linspace(0, 1, Y), indexing='xy'
+            ),
+            dim=-1,
+        )
+        self.register_buffer('grid_buffer', grid)
+
+    def get_coarse_coords(self, bt, device):
+        X, Y, H = self.grid_config
+        sb = self.pc_range
+        n_coarse = self.n_coarse
+        grid = self.grid_buffer
+
+        pillars = repeat(grid, 'x y c -> b (x y) c', b=bt)
+        rnd = torch.randperm(X * Y)[:n_coarse].to(device)
+        pillars = torch.index_select(pillars, dim=1, index=rnd)
+
+        # lift
+        n_xy = pillars.size(1)
+        pillars = repeat(pillars, 'bt xy c -> bt c (xy h)', h=H)
+
+        # -> Regular Z points
+        pillar_heights = torch.linspace(0, 1, H, device=device)
+        pillar_heights = repeat(pillar_heights, "h -> bt 1 (xy h)", bt=bt, xy=n_xy)
+
+        # Pillar pts: [0,1]
+        pillar_pts = torch.cat([pillars, pillar_heights], dim=1)
+
+        # Voxel coordinates: [-BoundMin, BoundMax]
+        scale = torch.tensor(
+            [sb[1] - sb[0], sb[3] - sb[2], sb[5] - sb[4]], device=device
+        ).view(1, 3, 1)
+        dist = torch.tensor([abs(sb[0]), abs(sb[2]), abs(sb[4])], device=device).view(
+            1, 3, 1
+        )
+        vox_coords = pillar_pts * scale - dist
+
+        # Voxel indices: [0,X-1]
+        xyz = torch.tensor([X - 1, Y - 1, H - 1], device=device).view(1, 3, 1)
+        vox_idx = (pillar_pts * xyz).round().to(torch.int32)
+
+        return vox_coords, vox_idx
+
+    def get_fine_coords(self, out, masks):
+        pass

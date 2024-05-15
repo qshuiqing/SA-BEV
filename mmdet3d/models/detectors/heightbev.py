@@ -13,14 +13,14 @@ class HeightBEV(BEVDepth4D):
     def __init__(self,
                  use_bev_paste=True,
                  bda_aug_conf=None,
-                 use_depth_supervised=False,
+                 use_height_supervised=False,
                  **kwargs):
         super(HeightBEV, self).__init__(**kwargs)
         self.use_bev_paste = use_bev_paste
         if use_bev_paste:
             self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
 
-        self.use_depth_supervised = use_depth_supervised
+        self.use_height_supervised = use_height_supervised
 
     @force_fp32(out_fp16=True)
     def inner_pre_process(self, bev_feat):
@@ -194,7 +194,7 @@ class HeightBEV(BEVDepth4D):
             points, img=img_inputs, img_metas=img_metas, **kwargs)
 
         losses = dict()
-        if self.use_depth_supervised:  # TODO supervised
+        if self.use_height_supervised:
             gt_height = kwargs['gt_height']
             gt_semantic = kwargs['gt_semantic']
             loss_depth, loss_semantic = \
