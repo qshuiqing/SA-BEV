@@ -41,7 +41,7 @@ voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-with_cp = True
+with_cp = False
 use_bev_paste = False
 use_sequential = False
 n_frame = 1 + 1 if use_sequential else 1
@@ -279,7 +279,7 @@ lr_config = dict(
 )
 
 checkpoint_config = dict(interval=1, max_keep_ckpts=2)
-runner = dict(type='EpochBasedRunner', max_epochs=1)
+runner = dict(type='EpochBasedRunner', max_epochs=24)
 evaluation = dict(interval=24, pipeline=test_pipeline)
 
 custom_hooks = [
@@ -291,3 +291,4 @@ custom_hooks = [
 ]
 
 # fp16 = dict(loss_scale='dynamic')
+load_from = 'ckpts/heightbev_pretrain.pth'
