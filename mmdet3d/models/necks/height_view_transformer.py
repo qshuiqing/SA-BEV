@@ -4,7 +4,6 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 from mmcv.runner import BaseModule, force_fp32
-from mmseg.ops import resize
 from torch import nn
 from torch.cuda.amp import autocast
 
@@ -93,7 +92,90 @@ class HeightVT(BaseModule):
 
         return cam2img, ego2cam[:, :3]
 
-    def view_transform(self, mlvl_feats, cam_params, img_metas):
+    def forward_wo_bev_paste(self, img_feats, cam_params, img_metas):
+        stride_i = math.ceil(self.input_size[-1] / img_feats.shape[-1])  # 16
+
+        volumes = []
+        for batch_id, img_meta in enumerate(img_metas):
+            feat_i = img_feats[batch_id]  # (n, c, h, w)
+            cam_param_i = [p[batch_id] for p in cam_params]
+
+            # 计算前视相机ego到图像投影矩阵
+            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+
+            # 计算前视相机ego下采点
+            n_voxels, voxel_size = self.n_voxels, self.voxel_size
+            points = get_points(  # [3, dz, dy, dx]
+                n_voxels=torch.tensor(n_voxels),
+                voxel_size=torch.tensor(voxel_size),
+                origin=torch.tensor(img_meta["origin"]),
+            ).to(feat_i.device)
+
+            volume = self.backproject_inplace(feat_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
+            volumes.append(volume)  # bs x (c, dz, dy, dx)
+        volumes = torch.stack(volumes, dim=0)  # (b, c, z, y, x)
+
+        # Height processing
+        bs, c, dz, dy, dx = volumes.shape
+        volumes = volumes.view(bs, c * dz, dy, dx)
+
+        return volumes
+
+    def forward_wi_bev_paste(self, img_feats, cam_params, img_metas, paste_idx, bda_paste):
+        stride_i = math.ceil(self.input_size[-1] / img_feats.shape[-1])  # 16
+
+        # 计算前视相机ego下采点
+        n_voxels, voxel_size = self.n_voxels, self.voxel_size
+        points = get_points(  # [3, dz, dy, dx]
+            n_voxels=torch.tensor(n_voxels),
+            voxel_size=torch.tensor(voxel_size),
+            origin=torch.tensor(img_metas[0]["origin"]),
+        ).to(img_feats.device)
+
+        # Alias
+        b, n, *_ = img_feats.shape
+
+        volumes = []
+        for paste_id in paste_idx:
+            # 0.
+            batch_0 = paste_id[0]
+            # 计算投影矩阵
+            cam_param_i = [p[batch_0] for p in cam_params]
+            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+
+            bda_mat = ego2cam.new_zeros(n, 4, 4)
+            bda_mat[:, :3, :3] = bda_paste[paste_id[0]]
+            bda_mat[:, 3, 3] = 1
+            ego2cam_0 = torch.matmul(ego2cam, torch.linalg.inv(bda_mat))
+
+            # VT
+            volume_0 = self.backproject_inplace(img_feats[batch_0], points, cam2img, ego2cam_0)  # [c, dz, dy, dx]
+
+            # 1.
+            batch_1 = paste_id[1]
+            # 计算投影矩阵
+            cam_param_i = [p[batch_1] for p in cam_params]
+            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+
+            bda_mat = ego2cam.new_zeros(n, 4, 4)
+            bda_mat[:, :3, :3] = bda_paste[paste_id[1]]
+            bda_mat[:, 3, 3] = 1
+            ego2cam_1 = torch.matmul(ego2cam, torch.linalg.inv(bda_mat))
+
+            # VT
+            volume_1 = self.backproject_inplace(img_feats[batch_1], points, cam2img, ego2cam_1)  # [c, dz, dy, dx]
+
+            volumes.append(volume_0 + volume_1)
+
+        volumes = torch.stack(volumes, dim=0)  # (b, c, z, y, x)
+
+        # Height processing
+        bs, c, dz, dy, dx = volumes.shape
+        volumes = volumes.view(bs, c * dz, dy, dx)
+
+        return volumes
+
+    def view_transform(self, mlvl_feats, cam_params, img_metas, paste_idx, bda_paste):
         """
         2D-to-3D视图转换
         Args:
@@ -104,65 +186,10 @@ class HeightVT(BaseModule):
             bev_feat:
         """
 
-        #
-        mlvl_volumes = []
-        for lvl, mlvl_feat in enumerate(mlvl_feats):  # 3
-            stride_i = math.ceil(self.input_size[-1] / mlvl_feat.shape[-1])  # 16
-
-            volumes = []
-            for batch_id, img_meta in enumerate(img_metas):
-                feat_i = mlvl_feat[batch_id]  # (n, c, h, w)
-                cam_param_i = [p[batch_id] for p in cam_params]
-
-                # 计算前视相机ego到图像投影矩阵
-                cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
-
-                # 计算前视相机ego下采点
-                n_voxels, voxel_size = self.n_voxels[lvl], self.voxel_size[lvl]
-                points = get_points(  # [3, dz, dy, dx]
-                    n_voxels=torch.tensor(n_voxels),
-                    voxel_size=torch.tensor(voxel_size),
-                    origin=torch.tensor(img_meta["origin"]),
-                ).to(feat_i.device)
-
-                if self.backproject == 'inplace':
-                    volume = self.backproject_inplace(feat_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
-                else:
-                    assert False
-                    # volume, valid = backproject_vanilla(
-                    #     feat_i[:, :, :, :], points, projection)
-                    # volume = volume.sum(dim=0)
-                    # valid = valid.sum(dim=0)
-                    # volume = volume / valid
-                    # valid = valid > 0
-                    # volume[:, ~valid[0]] = 0.0
-                volumes.append(volume)  # bs x (c, dz, dy, dx)
-            mlvl_volumes.append(torch.stack(volumes, dim=0))  # lvl x (bs, c, dz, dy, dx)
-
-        # multi-voxels -> multi-bev
-        for i in range(len(mlvl_volumes)):  # 3
-            mlvl_volume = mlvl_volumes[i]
-            bs, c, dz, dy, dx = mlvl_volume.shape
-            # (bs, c, dz, dy, dx)->(bs, c*dz, dy, dx)
-            mlvl_volume = mlvl_volume.view(bs, c * dz, dy, dx)
-
-            # (bs, c*dz, dy, dx) -> (bs, c*dz, dy', dx')
-            if self.multi_scale_3d_scaler == 'pool' and i != (len(mlvl_volumes) - 1):
-                # pooling to bottom level
-                mlvl_volume = F.adaptive_avg_pool2d(mlvl_volume, mlvl_volumes[-1].size()[2:4])
-            elif self.multi_scale_3d_scaler == 'upsample' and i != 0:
-                # upsampling to top level
-                mlvl_volume = resize(
-                    mlvl_volume,
-                    mlvl_volumes[0].size()[2:4],
-                    mode='bilinear',
-                    align_corners=False)
-            else:
-                # same x/y
-                pass
-
-            mlvl_volumes[i] = mlvl_volume
-        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # (bs, c1*dz1+c2*dz2+..., dy, dx)
+        if paste_idx is None:
+            mlvl_volumes = self.forward_wo_bev_paste(mlvl_feats, cam_params, img_metas)
+        else:
+            mlvl_volumes = self.forward_wi_bev_paste(mlvl_feats, cam_params, img_metas, paste_idx, bda_paste)
 
         return mlvl_volumes
 
@@ -190,7 +217,7 @@ class HeightVT(BaseModule):
         tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
         tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
 
-        return self.view_transform([tran_height_feat], cam_params, img_metas), \
+        return self.view_transform(tran_height_feat, cam_params, img_metas, paste_idx, bda_paste), \
             (height, semantic)
 
     def get_downsampled_gt_height_and_semantic(self, gt_heights, gt_semantics):

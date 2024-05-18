@@ -18,7 +18,7 @@ class HeightBEV(BEVDepth4D):
         super(HeightBEV, self).__init__(**kwargs)
         self.use_bev_paste = use_bev_paste
         if use_bev_paste:
-            self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, None, is_train=True)
+            self.loader = LoadAnnotationsBEVDepth(bda_aug_conf, is_train=True)
 
         self.use_height_supervised = use_height_supervised
 

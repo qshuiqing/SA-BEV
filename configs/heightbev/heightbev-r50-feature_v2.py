@@ -42,7 +42,7 @@ voxel_size = [0.1, 0.1, 0.2]
 numC_Trans = 80
 
 with_cp = False
-use_bev_paste = False
+use_bev_paste = True
 use_sequential = True
 n_frame = 1 + 1 if use_sequential else 1
 multi_adj_frame_id_cfg = (1, n_frame, 1)
@@ -78,16 +78,8 @@ model = dict(
         downsample=4,
         grid_config=grid_config,
         input_size=data_config['input_size'],
-        n_voxels=[
-            [256, 256, 10],  # 4x
-            # [192, 192, 6],  # 8x
-            # [128, 128, 6],  # 16x
-        ],
-        voxel_size=[
-            [0.4, 0.4, 0.8],  # 4x
-            # [8 / 15, 8 / 15, 1.0],  # 8x
-            # [0.8, 0.8, 1.0],  # 16x
-        ],
+        n_voxels=[256, 256, 10],  # 4x
+        voxel_size=[0.4, 0.4, 0.8],  # 4x
     ),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
@@ -231,7 +223,7 @@ share_data_config = dict(
     type=dataset_type,
     classes=class_names,
     modality=input_modality,
-    img_info_prototype='bevdet',
+    img_info_prototype='bevdet4d',
     multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
 )
 
