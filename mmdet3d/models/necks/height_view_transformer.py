@@ -1,15 +1,13 @@
-import math
-
 import torch
 import torch.nn.functional as F
-from einops import repeat
+from einops import rearrange
 from mmcv.runner import BaseModule, force_fp32
-from mmseg.ops import resize
-from torch import nn
 from torch.cuda.amp import autocast
 
 from .height_net import HeightNet
 from ..builder import NECKS
+from ..heightbev.projector import CamProjector
+from ..heightbev.sampled import SampledCoordSelector
 
 
 @NECKS.register_module()
@@ -29,12 +27,11 @@ class HeightVT(BaseModule):
                  loss_semantic_weight=25,
                  backproject='inplace',
                  multi_scale_3d_scaler='upsample',
+                 sampled_kwargs=None,
                  **kwargs):
         super(HeightVT, self).__init__(**kwargs)
 
         self.input_size = input_size
-        self.n_voxels = n_voxels
-        self.voxel_size = voxel_size
         self.grid_config = grid_config
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -42,7 +39,7 @@ class HeightVT(BaseModule):
         self.backproject = backproject
         self.multi_scale_3d_scaler = multi_scale_3d_scaler
 
-        self.H = len(torch.arange(*self.grid_config['height']))  # 10
+        self.H = len(torch.arange(*self.grid_config['z_bounds']))  # 10
         self.height_net = HeightNet(self.in_channels,
                                     self.in_channels,
                                     self.out_channels,
@@ -52,7 +49,11 @@ class HeightVT(BaseModule):
         self.loss_height_weight = loss_height_weight
         self.loss_semantic_weight = loss_semantic_weight
 
-        # self.fp16_enabled = False
+        # Random sample points
+        self.sampled_kwargs = sampled_kwargs
+
+        self.coord_selector = SampledCoordSelector(sampled_kwargs)
+        self.projector = CamProjector(sampled_kwargs)
 
     @autocast(enabled=False)
     def _compute_projection(self, rots, trans, intrinsics, post_rots, post_trans, bda, stride):
@@ -93,78 +94,53 @@ class HeightVT(BaseModule):
 
         return cam2img, ego2cam[:, :3]
 
-    def view_transform(self, mlvl_feats, cam_params, img_metas):
+    def forward_height(self, vox_feats):
+
+        vox_feats = rearrange(vox_feats, 'b c z y x -> b (c z) y x')
+
+        return vox_feats
+
+    def view_transform(self, mlvl_feat, cam_params, img_metas):
         """
         2D-to-3D视图转换
         Args:
-            mlvl_feats:
+            mlvl_feat:
             cam_params:
             img_metas:
         Returns:
             bev_feat:
         """
 
-        #
-        mlvl_volumes = []
-        for lvl, mlvl_feat in enumerate(mlvl_feats):  # 3
-            stride_i = math.ceil(self.input_size[-1] / mlvl_feat.shape[-1])  # 16
+        # Prepare
+        dict_shape = {
+            'Himg': self.input_size[0],
+            'Wimg': self.input_size[1],
+            'Hfeat': mlvl_feat.shape[-2],
+            'Wfeat': mlvl_feat.shape[-1],
+        }
 
-            volumes = []
-            for batch_id, img_meta in enumerate(img_metas):
-                feat_i = mlvl_feat[batch_id]  # (n, c, h, w)
-                cam_param_i = [p[batch_id] for p in cam_params]
+        vox_feats = []
+        for batch_id, feat_i in enumerate(mlvl_feat):
+            cam_param = [p[batch_id] for p in cam_params]
 
-                # 计算前视相机ego到图像投影矩阵
-                cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+            # Random sample points
+            voxel_coords, voxel_mask = self.coord_selector.get_coarse_coords(dict_shape)  # (3, 10, 256, 256)
 
-                # 计算前视相机ego下采点
-                n_voxels, voxel_size = self.n_voxels[lvl], self.voxel_size[lvl]
-                points = get_points(  # [3, dz, dy, dx]
-                    n_voxels=torch.tensor(n_voxels),
-                    voxel_size=torch.tensor(voxel_size),
-                    origin=torch.tensor(img_meta["origin"]),
-                ).to(feat_i.device)
+            # Project from ego to img
+            voxel_cam_coords, voxel_cam_heights, voxel_cam_valid = self.projector(voxel_coords,
+                                                                                  cam_param,
+                                                                                  dict_shape)
 
-                if self.backproject == 'inplace':
-                    volume = self.backproject_inplace(feat_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
-                else:
-                    assert False
-                    # volume, valid = backproject_vanilla(
-                    #     feat_i[:, :, :, :], points, projection)
-                    # volume = volume.sum(dim=0)
-                    # valid = valid.sum(dim=0)
-                    # volume = volume / valid
-                    # valid = valid > 0
-                    # volume[:, ~valid[0]] = 0.0
-                volumes.append(volume)  # bs x (c, dz, dy, dx)
-            mlvl_volumes.append(torch.stack(volumes, dim=0))  # lvl x (bs, c, dz, dy, dx)
+            # VT
+            voxel_feat_i = self.bp_projection(feat_i, voxel_cam_coords,
+                                              voxel_cam_heights, voxel_cam_valid, dict_shape)  # [c, dz, dy, dx]
+            vox_feats.append(voxel_feat_i)  # bs x (c, dz, dy, dx)
+        vox_feats = torch.stack(vox_feats, dim=0)  # (b, c, z, y, x)
 
-        # multi-voxels -> multi-bev
-        for i in range(len(mlvl_volumes)):  # 3
-            mlvl_volume = mlvl_volumes[i]
-            bs, c, dz, dy, dx = mlvl_volume.shape
-            # (bs, c, dz, dy, dx)->(bs, c*dz, dy, dx)
-            mlvl_volume = mlvl_volume.view(bs, c * dz, dy, dx)
+        # Height processing
+        bev_feats = self.forward_height(vox_feats)  # (b, c*z, y, x)
 
-            # (bs, c*dz, dy, dx) -> (bs, c*dz, dy', dx')
-            if self.multi_scale_3d_scaler == 'pool' and i != (len(mlvl_volumes) - 1):
-                # pooling to bottom level
-                mlvl_volume = F.adaptive_avg_pool2d(mlvl_volume, mlvl_volumes[-1].size()[2:4])
-            elif self.multi_scale_3d_scaler == 'upsample' and i != 0:
-                # upsampling to top level
-                mlvl_volume = resize(
-                    mlvl_volume,
-                    mlvl_volumes[0].size()[2:4],
-                    mode='bilinear',
-                    align_corners=False)
-            else:
-                # same x/y
-                pass
-
-            mlvl_volumes[i] = mlvl_volume
-        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # (bs, c1*dz1+c2*dz2+..., dy, dx)
-
-        return mlvl_volumes
+        return bev_feats
 
     def forward(self, img_inputs, img_metas):
 
@@ -190,15 +166,15 @@ class HeightVT(BaseModule):
         tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
         tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
 
-        return self.view_transform([tran_height_feat], cam_params, img_metas), \
+        return self.view_transform(tran_height_feat, cam_params, img_metas), \
             (height, semantic)
 
     def get_downsampled_gt_height_and_semantic(self, gt_heights, gt_semantics):
         # remove point not in height range
-        gt_semantics[gt_heights < self.grid_config['height'][0]] = 0
-        gt_semantics[gt_heights > self.grid_config['height'][1]] = 0
-        gt_heights[gt_heights < self.grid_config['height'][0]] = 0
-        gt_heights[gt_heights > self.grid_config['height'][1]] = 0
+        gt_semantics[gt_heights < self.grid_config['z_bounds'][0]] = 0
+        gt_semantics[gt_heights > self.grid_config['z_bounds'][1]] = 0
+        gt_heights[gt_heights < self.grid_config['z_bounds'][0]] = 0
+        gt_heights[gt_heights > self.grid_config['z_bounds'][1]] = 0
         gt_semantic_heights = gt_heights * gt_semantics
 
         # 语义下采样
@@ -240,7 +216,8 @@ class HeightVT(BaseModule):
         gt_heights = gt_heights.view(B * N, H // self.downsample,
                                      W // self.downsample)
         gt_heights = (gt_heights -
-                      (self.grid_config['height'][0] - self.grid_config['height'][2])) / self.grid_config['height'][2]
+                      (self.grid_config['z_bounds'][0] - self.grid_config['z_bounds'][2])) / \
+                     self.grid_config['z_bounds'][2]
         gt_heights = torch.where(
             (gt_heights < self.H + 1) & (gt_heights >= 0.0),
             gt_heights, torch.zeros_like(gt_heights))
@@ -263,8 +240,9 @@ class HeightVT(BaseModule):
         gt_semantic_heights = torch.where(gt_semantic_heights == 0.0,
                                           1e5 * torch.ones_like(gt_semantic_heights),
                                           gt_semantic_heights)
-        gt_semantic_heights = (gt_semantic_heights - (self.grid_config['height'][0] -
-                                                      self.grid_config['height'][2])) / self.grid_config['height'][2]
+        gt_semantic_heights = (gt_semantic_heights - (self.grid_config['z_bounds'][0] -
+                                                      self.grid_config['z_bounds'][2])) / self.grid_config['z_bounds'][
+                                  2]
         gt_semantic_heights = torch.where(
             (gt_semantic_heights < self.H + 1) & (gt_semantic_heights >= 0.0),
             gt_semantic_heights, torch.zeros_like(gt_semantic_heights)).long()
@@ -325,47 +303,30 @@ class HeightVT(BaseModule):
         """
         # [-5, 3, 0.1]
         # 将height离散化到 [-5, 3, 0.1] 的bin中
-        height = (height - (self.grid_config['height'][0] - self.grid_config['height'][2])) / \
-                 self.grid_config['height'][2]
+        height = (height - (self.grid_config['z_bounds'][0] - self.grid_config['z_bounds'][2])) / \
+                 self.grid_config['z_bounds'][2]
         return height.long()
 
-    def backproject_inplace(self, features, ego_coords, cam2img, ego2cam):
-        """
-        function: 2d feature + predefined point cloud -> 3d volume
-        input:
-            features: [6, 256, 10, 32, 88]
-            points: [3, 10, 128, 128]
-            cam2img: [6, 3, 3]
-            ego2cam: [6, 3, 4]
-        output:
-            volume: [256, 10, 128, 128]
-        """
-        n_images, n_channels, n_height, height, width = features.shape
-        n_z_voxels, n_y_voxels, n_x_voxels = ego_coords.shape[-3:]
-        ego_coords = ego_coords.view(1, 3, -1).expand(n_images, 3, -1)
-        ego_coords = torch.cat((ego_coords, torch.ones_like(ego_coords[:, :1])), dim=1)
+    def bp_projection(self, features, voxel_cam_coords,
+                      voxel_cam_heights, voxel_cam_valid, dict_shape):
+        # Alias
+        n, c, *_ = features.shape  # 6, 80, [10, 64, 176]
+        Z, Y, X = dict_shape['Z'], dict_shape['Y'], dict_shape['X']  # 10, 256, 256
 
-        # ego to cam
-        cam_coords = torch.bmm(ego2cam, ego_coords)
-        height_bin = self.map2bin(cam_coords[:, 1, :])
+        x = voxel_cam_coords[:, 0].round().long()  # [6, 480000]
+        y = voxel_cam_coords[:, 1].round().long()  # [6, 480000]
 
-        # cam to img
-        points_2d_3 = torch.bmm(cam2img, cam_coords)
-        x = (points_2d_3[:, 0] / points_2d_3[:, 2]).round().long()  # [6, 480000]
-        y = (points_2d_3[:, 1] / points_2d_3[:, 2]).round().long()  # [6, 480000]
-        z = points_2d_3[:, 2]  # [6, 480000]
-        valid = (x >= 0) & (y >= 0) & (x < width) & (y < height) & (z > 0) & (height_bin > 0) & (
-                height_bin < self.H + 1)  # [6, 480000]
-
-        # 特征填充，只填充有效特征，重复特征直接覆盖
-        volume = torch.zeros(
-            (n_channels, ego_coords.shape[-1]), device=features.device
+        # VT
+        voxel_feats = torch.zeros(  # (80, Npts)
+            (c, Z * Y * X), device=features.device
         ).type_as(features)
-        for i in range(n_images):
-            volume[:, valid[i]] = features[i, :, height_bin[i, valid[i]] - 1, y[i, valid[i]], x[i, valid[i]]]
+        for i in range(n):
+            voxel_feats[:, voxel_cam_valid[i]] = features[i, :, voxel_cam_heights[i, voxel_cam_valid[i]] - 1,
+                                                 y[i, voxel_cam_valid[i]], x[i, voxel_cam_valid[i]]]
 
-        volume = volume.view(n_channels, n_z_voxels, n_y_voxels, n_x_voxels)
-        return volume
+        voxel_feats = rearrange(voxel_feats, 'c (z y x) -> c z y x', c=c, z=Z, y=Y, x=X)
+
+        return voxel_feats  # (80, 10, 256, 256)
 
     def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
         B, N, _, _ = rot.shape
@@ -452,77 +413,3 @@ def backproject_vanilla(features, points, projection):
     # [6, 480000] -> [6, 1, 200, 200, 12]
     valid = valid.view(n_images, 1, n_z_voxels, n_y_voxels, n_x_voxels)
     return volume, valid
-
-
-class SampledCoordSelector(nn.Module):
-    """前视相机ego坐标系中采点
-    """
-
-    def __init__(self,
-                 pc_range,
-                 grid_config,
-                 sampled_kwargs):
-        super(SampledCoordSelector, self).__init__()
-
-        self.pc_range = pc_range
-        self.grid_config = grid_config
-
-        # Init
-        self._init_status(sampled_kwargs)
-        self._init_buffer()
-
-    def _init_status(self, sampled_kwargs):
-        # Coarse
-        self.n_coarse = sampled_kwargs['n_coarse']
-
-        # Fine
-        self.n_fine = sampled_kwargs['n_fine']
-
-    def _init_buffer(self):
-        X, Y, H = self.grid_config
-        grid = torch.stack(  # (Y, X, 2)
-            torch.meshgrid(
-                torch.linspace(0, 1, X), torch.linspace(0, 1, Y), indexing='xy'
-            ),
-            dim=-1,
-        )
-        self.register_buffer('grid_buffer', grid)
-
-    def get_coarse_coords(self, bt, device):
-        X, Y, H = self.grid_config
-        sb = self.pc_range
-        n_coarse = self.n_coarse
-        grid = self.grid_buffer
-
-        pillars = repeat(grid, 'x y c -> b (x y) c', b=bt)
-        rnd = torch.randperm(X * Y)[:n_coarse].to(device)
-        pillars = torch.index_select(pillars, dim=1, index=rnd)
-
-        # lift
-        n_xy = pillars.size(1)
-        pillars = repeat(pillars, 'bt xy c -> bt c (xy h)', h=H)
-
-        # -> Regular Z points
-        pillar_heights = torch.linspace(0, 1, H, device=device)
-        pillar_heights = repeat(pillar_heights, "h -> bt 1 (xy h)", bt=bt, xy=n_xy)
-
-        # Pillar pts: [0,1]
-        pillar_pts = torch.cat([pillars, pillar_heights], dim=1)
-
-        # Voxel coordinates: [-BoundMin, BoundMax]
-        scale = torch.tensor(
-            [sb[1] - sb[0], sb[3] - sb[2], sb[5] - sb[4]], device=device
-        ).view(1, 3, 1)
-        dist = torch.tensor([abs(sb[0]), abs(sb[2]), abs(sb[4])], device=device).view(
-            1, 3, 1
-        )
-        vox_coords = pillar_pts * scale - dist
-
-        # Voxel indices: [0,X-1]
-        xyz = torch.tensor([X - 1, Y - 1, H - 1], device=device).view(1, 3, 1)
-        vox_idx = (pillar_pts * xyz).round().to(torch.int32)
-
-        return vox_coords, vox_idx
-
-    def get_fine_coords(self, out, masks):
-        pass
