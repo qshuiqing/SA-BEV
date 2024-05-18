@@ -107,7 +107,7 @@ class HeightBEV(BEVDepth4D):
                     bev_feat, img_preds = self.prepare_bev_feat(*inputs_curr, img_metas)
                 else:
                     with torch.no_grad():
-                        bev_feat, _ = self.prepare_bev_feat(*inputs_curr)
+                        bev_feat, _ = self.prepare_bev_feat(*inputs_curr, img_metas)
             else:
                 bev_feat = torch.zeros_like(bev_feat_list[0])
             bev_feat_list.append(bev_feat)

@@ -43,7 +43,7 @@ numC_Trans = 80
 
 with_cp = False
 use_bev_paste = False
-use_sequential = False
+use_sequential = True
 n_frame = 1 + 1 if use_sequential else 1
 multi_adj_frame_id_cfg = (1, n_frame, 1)
 
@@ -287,6 +287,10 @@ custom_hooks = [
         type='MEGVIIEMAHook',
         init_updates=10560,
         priority='NORMAL',
+    ),
+    dict(
+        type='SequentialControlHook',
+        temporal_start_epoch=3,
     ),
 ]
 
