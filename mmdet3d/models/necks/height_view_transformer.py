@@ -122,7 +122,7 @@ class HeightVT(BaseModule):
         return volumes
 
     def forward_wi_bev_paste(self, img_feats, cam_params, img_metas, paste_idx, bda_paste):
-        stride_i = math.ceil(self.input_size[-1] / img_feats.shape[-1])  # 16
+        rescale = math.ceil(self.input_size[-1] / img_feats.shape[-1])  # 16
 
         # 计算前视相机ego下采点
         n_voxels, voxel_size = self.n_voxels, self.voxel_size
@@ -136,34 +136,35 @@ class HeightVT(BaseModule):
         b, n, *_ = img_feats.shape
 
         volumes = []
-        for paste_id in paste_idx:
-            # 0.
-            batch_0 = paste_id[0]
-            # 计算投影矩阵
-            cam_param_i = [p[batch_0] for p in cam_params]
-            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+        for idx, paste_id in enumerate(paste_idx):  # [[0, 1], [1, 2]]
+            # [0, 1]
 
-            bda_mat = ego2cam.new_zeros(n, 4, 4)
-            bda_mat[:, :3, :3] = bda_paste[paste_id[0]]
+            # 2次增强矩阵
+            bda_mat = img_feats.new_zeros(n, 4, 4)
+            bda_mat[:, :3, :3] = bda_paste[idx]
             bda_mat[:, 3, 3] = 1
-            ego2cam_0 = torch.matmul(ego2cam, torch.linalg.inv(bda_mat))
 
-            # VT
-            volume_0 = self.backproject_inplace(img_feats[batch_0], points, cam2img, ego2cam_0)  # [c, dz, dy, dx]
+            # 0.
+            batch_0 = paste_id[0]  # 0
+            cam_param_0 = [p[batch_0] for p in cam_params]
+
+            # 计算前视相机ego到图像投影矩阵
+            cam2img_0, ego2cam_0 = self._compute_projection(*cam_param_0, rescale)
+            ego2cam_0 = torch.matmul(ego2cam_0, torch.linalg.inv(bda_mat))
+
+            # 投影
+            volume_0 = self.backproject_inplace(img_feats[batch_0], points, cam2img_0, ego2cam_0)  # [c, dz, dy, dx]
 
             # 1.
-            batch_1 = paste_id[1]
-            # 计算投影矩阵
-            cam_param_i = [p[batch_1] for p in cam_params]
-            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+            batch_1 = paste_id[1]  # 1
+            cam_param_1 = [p[batch_1] for p in cam_params]
 
-            bda_mat = ego2cam.new_zeros(n, 4, 4)
-            bda_mat[:, :3, :3] = bda_paste[paste_id[1]]
-            bda_mat[:, 3, 3] = 1
-            ego2cam_1 = torch.matmul(ego2cam, torch.linalg.inv(bda_mat))
+            # 计算前视相机ego到图像投影矩阵
+            cam2img_1, ego2cam_1 = self._compute_projection(*cam_param_1, rescale)
+            ego2cam_1 = torch.matmul(ego2cam_1, torch.linalg.inv(bda_mat))
 
-            # VT
-            volume_1 = self.backproject_inplace(img_feats[batch_1], points, cam2img, ego2cam_1)  # [c, dz, dy, dx]
+            # 投影
+            volume_1 = self.backproject_inplace(img_feats[batch_1], points, cam2img_1, ego2cam_1)  # [c, dz, dy, dx]
 
             volumes.append(volume_0 + volume_1)
 
