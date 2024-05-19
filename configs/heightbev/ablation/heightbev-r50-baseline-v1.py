@@ -41,11 +41,17 @@ voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-with_cp = False
+with_cp = True
 use_bev_paste = False
 use_sequential = False
 n_frame = 1 + 1 if use_sequential else 1
 multi_adj_frame_id_cfg = (1, n_frame, 1)
+
+# 图像增强开关
+use_img_aug = False
+
+# BDA增强开关
+use_bda_aug = False
 
 model = dict(
     type='HeightBEV',
@@ -167,14 +173,14 @@ train_pipeline = [
     dict(
         type='PrepareImageInputs',
         data_config=data_config,
-        is_train=True,
+        is_train=use_img_aug,
         sequential=use_sequential,
         load_point_label=True,
     ),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
-        is_train=True,
+        is_train=use_bda_aug,
     ),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -232,7 +238,7 @@ test_data_config = dict(
     ann_file=data_root + 'pkl/bevdetv2-nuscenes_infos_val.pkl')
 
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=2,
     workers_per_gpu=4,
     train=dict(
         data_root=data_root,
@@ -271,7 +277,7 @@ lr_config = dict(
 )
 
 total_epochs = 20
-checkpoint_config = dict(interval=1, max_keep_ckpts=2)
+checkpoint_config = dict(interval=1, max_keep_ckpts=1)
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
 
@@ -280,10 +286,6 @@ custom_hooks = [
         type='MEGVIIEMAHook',
         init_updates=10560,
         priority='NORMAL',
-    ),
-    dict(
-        type='SequentialControlHook',
-        temporal_start_epoch=3,
     ),
 ]
 
