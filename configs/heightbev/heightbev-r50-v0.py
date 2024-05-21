@@ -16,8 +16,8 @@ use_img_aug = False
 use_bda_aug = False
 
 # v2 验证高度&语义
-use_height = True
-use_semantic = True
+use_height = False
+use_semantic = False
 
 # v3 验证体素大小
 voxel_v1 = [[128, 128, 10], [0.8, 0.8, 0.8]]
@@ -86,7 +86,7 @@ model = dict(
     type='HeightBEV',
     use_bev_paste=use_bev_paste,
     bda_aug_conf=bda_aug_conf,
-    use_height_supervised=True,
+    use_height_supervised=use_height,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     img_backbone=dict(
         type='ResNet',
