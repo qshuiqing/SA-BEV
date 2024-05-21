@@ -2,9 +2,8 @@ import math
 
 import torch
 import torch.nn.functional as F
-from einops import repeat
+from einops import repeat, rearrange
 from mmcv.runner import BaseModule, force_fp32
-from mmseg.ops import resize
 from torch import nn
 from torch.cuda.amp import autocast
 
@@ -23,6 +22,8 @@ class HeightVT(BaseModule):
                  in_channels,
                  out_channels,
                  downsample,
+                 use_height,
+                 use_semantic,
                  height_threshold=1,
                  semantic_threshold=0.25,
                  loss_height_weight=3,
@@ -39,6 +40,8 @@ class HeightVT(BaseModule):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.downsample = downsample
+        self.use_height = use_height
+        self.use_semantic = use_semantic
         self.backproject = backproject
         self.multi_scale_3d_scaler = multi_scale_3d_scaler
 
@@ -93,78 +96,41 @@ class HeightVT(BaseModule):
 
         return cam2img, ego2cam[:, :3]
 
-    def view_transform(self, mlvl_feats, cam_params, img_metas):
-        """
-        2D-to-3D视图转换
-        Args:
-            mlvl_feats:
-            cam_params:
-            img_metas:
-        Returns:
-            bev_feat:
-        """
+    def view_transform(self, mlvl_feat, height, mask, cam_params, img_metas):
+        # Alias
+        b, n, *_ = cam_params[0].shape  # b, 6, [3, 3]
+        stride_i = math.ceil(self.input_size[-1] / mlvl_feat.shape[-1])  # 4
+        n_voxels, voxel_size = self.n_voxels, self.voxel_size  # [128, 128, 10], [0.8, 0.8, 0.8]
+        points = get_points(  # (3, z, y, x)
+            n_voxels=torch.tensor(n_voxels),
+            voxel_size=torch.tensor(voxel_size),
+            origin=torch.tensor(img_metas[0]["origin"]),
+        ).to(mlvl_feat.device)
 
-        #
-        mlvl_volumes = []
-        for lvl, mlvl_feat in enumerate(mlvl_feats):  # 3
-            stride_i = math.ceil(self.input_size[-1] / mlvl_feat.shape[-1])  # 16
+        # Rearrange
+        mlvl_feat = rearrange(mlvl_feat, '(b n) c h w -> b n c h w', b=b, n=n)  # (b, 6, 80, 64, 176)
+        height = rearrange(height, '(b n) c h w -> b n c h w', b=b, n=n)  # (b, 6, 10, 64, 176)
+        mask = rearrange(mask, '(b n) c h w -> b n c h w', b=b, n=n)  # (b, 6, 1, 64, 176)
 
-            volumes = []
-            for batch_id, img_meta in enumerate(img_metas):
-                feat_i = mlvl_feat[batch_id]  # (n, c, h, w)
-                cam_param_i = [p[batch_id] for p in cam_params]
+        # VT
+        vox_feats = []
+        for batch_id, img_meta in enumerate(img_metas):
+            feat_i = mlvl_feat[batch_id]  # (n, c, h, w)
+            height_i = height[batch_id] if self.use_height else None
+            mask_i = mask[batch_id] if self.use_semantic else None
+            cam_param_i = [p[batch_id] for p in cam_params]
 
-                # 计算前视相机ego到图像投影矩阵
-                cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
+            # Ego to cameras & camera to image.
+            cam2img, ego2cam = self._compute_projection(*cam_param_i, stride_i)
 
-                # 计算前视相机ego下采点
-                n_voxels, voxel_size = self.n_voxels[lvl], self.voxel_size[lvl]
-                points = get_points(  # [3, dz, dy, dx]
-                    n_voxels=torch.tensor(n_voxels),
-                    voxel_size=torch.tensor(voxel_size),
-                    origin=torch.tensor(img_meta["origin"]),
-                ).to(feat_i.device)
+            volume = self.backproject_inplace(feat_i, height_i, mask_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
+            vox_feats.append(volume)  # bs x (c, dz, dy, dx)
+        vox_feats = torch.stack(vox_feats, dim=0)  # (b, c, z, y, x)
 
-                if self.backproject == 'inplace':
-                    volume = self.backproject_inplace(feat_i, points, cam2img, ego2cam)  # [c, dz, dy, dx]
-                else:
-                    assert False
-                    # volume, valid = backproject_vanilla(
-                    #     feat_i[:, :, :, :], points, projection)
-                    # volume = volume.sum(dim=0)
-                    # valid = valid.sum(dim=0)
-                    # volume = volume / valid
-                    # valid = valid > 0
-                    # volume[:, ~valid[0]] = 0.0
-                volumes.append(volume)  # bs x (c, dz, dy, dx)
-            mlvl_volumes.append(torch.stack(volumes, dim=0))  # lvl x (bs, c, dz, dy, dx)
+        # Height processing
+        bev_feats = rearrange(vox_feats, 'b c z y x -> b (c z) y x')
 
-        # multi-voxels -> multi-bev
-        for i in range(len(mlvl_volumes)):  # 3
-            mlvl_volume = mlvl_volumes[i]
-            bs, c, dz, dy, dx = mlvl_volume.shape
-            # (bs, c, dz, dy, dx)->(bs, c*dz, dy, dx)
-            mlvl_volume = mlvl_volume.view(bs, c * dz, dy, dx)
-
-            # (bs, c*dz, dy, dx) -> (bs, c*dz, dy', dx')
-            if self.multi_scale_3d_scaler == 'pool' and i != (len(mlvl_volumes) - 1):
-                # pooling to bottom level
-                mlvl_volume = F.adaptive_avg_pool2d(mlvl_volume, mlvl_volumes[-1].size()[2:4])
-            elif self.multi_scale_3d_scaler == 'upsample' and i != 0:
-                # upsampling to top level
-                mlvl_volume = resize(
-                    mlvl_volume,
-                    mlvl_volumes[0].size()[2:4],
-                    mode='bilinear',
-                    align_corners=False)
-            else:
-                # same x/y
-                pass
-
-            mlvl_volumes[i] = mlvl_volume
-        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # (bs, c1*dz1+c2*dz2+..., dy, dx)
-
-        return mlvl_volumes
+        return bev_feats
 
     def forward(self, img_inputs, img_metas):
 
@@ -172,25 +138,25 @@ class HeightVT(BaseModule):
          mlp_input, paste_idx, bda_paste) = img_inputs[:10]
         cam_params = img_inputs[1:7]
 
-        # 最后一层高度预测
-        x = x[0]  # (bs, n, c, 32, 88)
-        B, N, C, H, W = x.shape
-        x = x.view(B * N, C, H, W)
-        x = self.height_net(x, mlp_input)
+        # Alias
+        x = rearrange(x, 'b n c h w -> (b n) c h w')  # (b * 6, 128, 64, 176)
 
-        height_digit = x[:, :self.H, ...]  # (bs*n, 10, 32, 88)
-        semantic_digit = x[:, self.H:self.H + 2]  # (bs*n, 2, 32, 88)
-        tran_feat = x[:, self.H + 2:self.H + 2 + self.out_channels, ...]  # (bs*n, 256, 32, 88)
+        # Height & Semantic predict
+        x = self.height_net(x, mlp_input)  # (b * 6, 92, 64, 176)
 
+        # Alias
+        height_digit = x[:, :self.H, ...]  # (b * 6, 10, 64, 176)
+        semantic_digit = x[:, self.H:self.H + 2]  # (b * 6, 2, 64, 176)
+        tran_feat = x[:, self.H + 2:self.H + 2 + self.out_channels, ...]  # (b * n, 80, 64, 176)
         height = height_digit.softmax(dim=1)
         semantic = semantic_digit.softmax(dim=1)
-        kept = (height >= self.height_threshold) * (semantic[:, 1:2] >= self.semantic_threshold)  # (24, 10, 32, 88)
+        mask = (height >= self.height_threshold)
 
-        # (bs*n, 256, 10, 32, 88)
-        tran_height_feat = tran_feat[:, :, None, :, :] * height[:, None, :, :, :] * kept[:, None, :, :, :]
-        tran_height_feat = tran_height_feat.view([B, N] + list(tran_height_feat.shape[1:]))
+        # Use semantic
+        if self.use_semantic:
+            mask = mask * (semantic[:, 1:2] >= self.semantic_threshold)
 
-        return self.view_transform([tran_height_feat], cam_params, img_metas), \
+        return self.view_transform(tran_feat, height, mask, cam_params, img_metas), \
             (height, semantic)
 
     def get_downsampled_gt_height_and_semantic(self, gt_heights, gt_semantics):
@@ -329,43 +295,44 @@ class HeightVT(BaseModule):
                  self.grid_config['height'][2]
         return height.long()
 
-    def backproject_inplace(self, features, ego_coords, cam2img, ego2cam):
-        """
-        function: 2d feature + predefined point cloud -> 3d volume
-        input:
-            features: [6, 256, 10, 32, 88]
-            points: [3, 10, 128, 128]
-            cam2img: [6, 3, 3]
-            ego2cam: [6, 3, 4]
-        output:
-            volume: [256, 10, 128, 128]
-        """
-        n_images, n_channels, n_height, height, width = features.shape
-        n_z_voxels, n_y_voxels, n_x_voxels = ego_coords.shape[-3:]
-        ego_coords = ego_coords.view(1, 3, -1).expand(n_images, 3, -1)
+    def backproject_inplace(self, features, height, mask, ego_coords, cam2img, ego2cam):
+        # Alias
+        n, c, Himg, Wimg = features.shape
+        n_z, n_y, n_x = ego_coords.shape[-3:]
+        ego_coords = ego_coords.view(1, 3, -1).expand(n, 3, -1)
         ego_coords = torch.cat((ego_coords, torch.ones_like(ego_coords[:, :1])), dim=1)
 
-        # ego to cam
+        # Ego to cameras.
         cam_coords = torch.bmm(ego2cam, ego_coords)
         height_bin = self.map2bin(cam_coords[:, 1, :])
 
-        # cam to img
+        # Camera to image.
         points_2d_3 = torch.bmm(cam2img, cam_coords)
         x = (points_2d_3[:, 0] / points_2d_3[:, 2]).round().long()  # [6, 480000]
         y = (points_2d_3[:, 1] / points_2d_3[:, 2]).round().long()  # [6, 480000]
         z = points_2d_3[:, 2]  # [6, 480000]
-        valid = (x >= 0) & (y >= 0) & (x < width) & (y < height) & (z > 0) & (height_bin > 0) & (
+        valid = (x >= 0) & (y >= 0) & (x < Wimg) & (y < Himg) & (z > 0) & (height_bin > 0) & (
                 height_bin < self.H + 1)  # [6, 480000]
 
-        # 特征填充，只填充有效特征，重复特征直接覆盖
-        volume = torch.zeros(
-            (n_channels, ego_coords.shape[-1]), device=features.device
-        ).type_as(features)
-        for i in range(n_images):
-            volume[:, valid[i]] = features[i, :, height_bin[i, valid[i]] - 1, y[i, valid[i]], x[i, valid[i]]]
+        if self.use_height:
+            features = features[:, :, None, :, :] * height[:, None, :, :, :]
+        else:
+            features = repeat(features, 'n c h w -> n c n_height h w', n_height=self.H)
 
-        volume = volume.view(n_channels, n_z_voxels, n_y_voxels, n_x_voxels)
-        return volume
+        if self.use_semantic:
+            assert self.use_height, '[use_height] must be true.'
+            features = features * mask[:, None, :, :, :]
+
+        # VT
+        vox_feats = torch.zeros(
+            (c, ego_coords.shape[-1]), device=features.device
+        ).type_as(features)
+        for i in range(n):
+            vox_feats[:, valid[i]] = features[i, :, height_bin[i, valid[i]] - 1, y[i, valid[i]], x[i, valid[i]]]
+
+        vox_feats = rearrange(vox_feats, 'c (z y x) -> c z y x', c=c, z=n_z, y=n_y, x=n_x)
+
+        return vox_feats
 
     def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
         B, N, _, _ = rot.shape

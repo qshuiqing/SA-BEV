@@ -1,4 +1,5 @@
 import torch
+from einops import rearrange
 from mmcv.runner import force_fp32
 from mmdet.models import DETECTORS
 from torch.cuda.amp import autocast
@@ -50,18 +51,17 @@ class HeightBEV(BEVDepth4D):
         return bev_feat, img_preds
 
     def image_encoder(self, img):
-        imgs = img
-        B, N, C, imH, imW = imgs.shape
-        imgs = imgs.view(B * N, C, imH, imW)
-        x = list(self.img_backbone(imgs))
-        if self.with_img_neck:
-            x[1] = self.img_neck(x)
-            if type(x) in [list, tuple]:
-                x = x[:2]
-        for i in range(2):
-            _, output_dim, ouput_H, output_W = x[i].shape
-            x[i] = x[i].view(B, N, output_dim, ouput_H, output_W)
-        return x[:2][::-1]
+        # Alias
+        imgs = img  # (b, 6, 3, 256, 704)
+        b, n, *_ = imgs.shape
+
+        imgs = rearrange(imgs, 'b n c h w -> (b n) c h w')  # (b * 6, 3, 256, 704)
+
+        x = self.img_neck(self.img_backbone(imgs))  # (b * 6, 128, 64, 176) x4
+
+        x = rearrange(x, '(b n) c h w -> b n c h w', b=b, n=n)  # (b, 6, 128, 64, 176)
+
+        return x
 
     def prepare_inputs(self, inputs):
         # split the inputs into each frame
