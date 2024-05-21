@@ -9,13 +9,55 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
+# 消融实验 start
+
+# v1 验证增强
+use_img_aug = True
+use_bda_aug = True
+
+# v2 验证高度&语义
+use_height = True
+use_semantic = True
+
+# v3 验证体素大小
+voxel_v1 = [[128, 128, 10], [0.8, 0.8, 0.8]]
+voxel_v2 = [[128, 128, 20], [0.8, 0.8, 0.4]]
+voxel_v3 = [[128, 128, 40], [0.8, 0.8, 0.2]]
+voxel_v4 = [[256, 256, 10], [0.4, 0.4, 0.8]]
+
+voxel = voxel_v4
+
+grid_config = {
+    'height': [-5.0, 3.0, voxel[1][-1]],  # 10
+}
+
+# v4 验证图片尺寸影响
+input_size_v1 = (256, 448)
+input_size_v2 = (256, 704)
+input_size_v3 = (464, 800)
+input_size_v4 = (544, 960)
+input_size_v5 = (704, 1208)
+input_size_v6 = (832, 1440)
+input_size_v7 = (928, 1600)
+
+input_size = input_size_v2
+
+# v5 验证多帧融合
+use_frame_fuse = False
+
+# v6 验证 bev paste
+use_bev_paste = False
+
+# 消融实现 end
+
+
 data_config = {
     'cams': [
         'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT',
         'CAM_BACK', 'CAM_BACK_RIGHT'
     ],
     'Ncams': 6,
-    'input_size': (256, 704),
+    'input_size': input_size,
     'src_size': (900, 1600),
 
     # Augmentation
@@ -24,11 +66,6 @@ data_config = {
     'flip': True,
     'crop_h': (0.0, 0.0),
     'resize_test': 0.00,
-}
-
-# Model
-grid_config = {
-    'height': [-3.0, 3.0, 0.6],  # 10
 }
 
 bda_aug_conf = dict(
@@ -41,53 +78,45 @@ voxel_size = [0.1, 0.1, 0.2]
 
 numC_Trans = 80
 
-with_cp = True
-use_bev_paste = False
-use_sequential = False
-n_frame = 1 + 1 if use_sequential else 1
+with_cp = False
+n_frame = 1 + 1 if use_frame_fuse else 1
 multi_adj_frame_id_cfg = (1, n_frame, 1)
 
 model = dict(
     type='HeightBEV',
     use_bev_paste=use_bev_paste,
     bda_aug_conf=bda_aug_conf,
-    use_depth_supervised=True,
+    use_height_supervised=use_height,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     img_backbone=dict(
         type='ResNet',
         depth=50,
         num_stages=4,
-        out_indices=(1, 2, 3),
-        frozen_stages=-1,
+        out_indices=(0, 1, 2, 3),
+        frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=False,
+        norm_eval=True,
         init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50'),
         with_cp=with_cp,
         style='pytorch'),
-    img_neck=dict(  # TODO multi-scale feats
+    img_neck=dict(
         type='CustomFPN',
-        in_channels=[512, 1024, 2048],
-        out_channels=256,
+        in_channels=[256, 512, 1024, 2048],
+        out_channels=128,
         num_outs=1,
         start_level=0,
         out_ids=[0]),
     img_view_transformer=dict(
         type='HeightVT',
-        in_channels=256,
-        out_channels=256,
-        downsample=8,
+        in_channels=128,
+        out_channels=numC_Trans,
+        downsample=4,
+        use_height=use_height,
+        use_semantic=use_semantic,
         grid_config=grid_config,
         input_size=data_config['input_size'],
-        n_voxels=[  # TODO multi-voxels
-            [256, 256, 10],  # 4x
-            # [192, 192, 6],  # 8x
-            # [128, 128, 6],  # 16x
-        ],
-        voxel_size=[
-            [0.4, 0.4, 0.8],  # 4x
-            # [8 / 15, 8 / 15, 1.0],  # 8x
-            # [0.8, 0.8, 1.0],  # 16x
-        ],
+        n_voxels=voxel[0],  # 4x
+        voxel_size=voxel[1],  # 4x,
     ),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
@@ -99,7 +128,7 @@ model = dict(
         out_channels=256),
     pre_process=dict(
         type='CustomResNet',
-        numC_input=256 * 10,
+        numC_input=numC_Trans * 10,
         num_layer=[2, ],
         num_channels=[numC_Trans, ],
         stride=[2, ],
@@ -175,14 +204,14 @@ train_pipeline = [
     dict(
         type='PrepareImageInputs',
         data_config=data_config,
-        is_train=True,
-        sequential=use_sequential,
+        is_train=use_img_aug,
+        sequential=use_frame_fuse,
         load_point_label=True,
     ),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
-        is_train=True,
+        is_train=use_bda_aug,
     ),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -197,7 +226,7 @@ test_pipeline = [
         type='PrepareImageInputs',
         data_config=data_config,
         is_train=False,
-        sequential=use_sequential,
+        sequential=use_frame_fuse,
         load_point_label=False,
     ),
     dict(
@@ -231,7 +260,7 @@ share_data_config = dict(
     type=dataset_type,
     classes=class_names,
     modality=input_modality,
-    img_info_prototype='bevdet',
+    img_info_prototype='bevdet4d',
     multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
 )
 
@@ -260,18 +289,28 @@ for key in ['val', 'test']:
 data['train'].update(share_data_config)
 
 # Optimizer
-optimizer = dict(type='AdamW', lr=2e-4, weight_decay=1e-2)
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+optimizer = dict(
+    type='AdamW',
+    lr=0.0001,
+    weight_decay=0.01,
+    paramwise_cfg=dict(
+        custom_keys={'img_backbone': dict(lr_mult=0.1, decay_mult=1.0)}))
+optimizer_config = dict(grad_clip=dict(max_norm=35., norm_type=2))
+# learning policy
 lr_config = dict(
-    policy='step',
+    policy='poly',
     warmup='linear',
-    warmup_iters=200,
-    warmup_ratio=0.001,
-    step=[24, ])
+    warmup_iters=1000,
+    warmup_ratio=1e-6,
+    power=1.0,
+    min_lr=0,
+    by_epoch=False
+)
 
-checkpoint_config = dict(interval=1, max_keep_ckpts=2)
-runner = dict(type='EpochBasedRunner', max_epochs=24)
-evaluation = dict(interval=24, pipeline=test_pipeline)
+total_epochs = 20
+checkpoint_config = dict(interval=1, max_keep_ckpts=1)
+runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
+evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
 
 custom_hooks = [
     dict(
@@ -279,6 +318,10 @@ custom_hooks = [
         init_updates=10560,
         priority='NORMAL',
     ),
+    dict(
+        type='SequentialControlHook',
+        temporal_start_epoch=3,
+    ),
 ]
 
-# fp16 = dict(loss_scale='dynamic')
+load_from = 'ckpts/heightbev_pretrain.pth'

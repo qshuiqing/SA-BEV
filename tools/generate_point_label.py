@@ -1,28 +1,29 @@
+import copy
 import os
 import os.path as osp
-import copy
+
 import numpy as np
-from pyquaternion import Quaternion
-from tqdm import tqdm
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
 from nuscenes.utils.geometry_utils import view_points
+from pyquaternion import Quaternion
+from tqdm import tqdm
 
 NameMapping = {
-        'movable_object.barrier': 'barrier',
-        'vehicle.bicycle': 'bicycle',
-        'vehicle.bus.bendy': 'bus',
-        'vehicle.bus.rigid': 'bus',
-        'vehicle.car': 'car',
-        'vehicle.construction': 'construction_vehicle',
-        'vehicle.motorcycle': 'motorcycle',
-        'human.pedestrian.adult': 'pedestrian',
-        'human.pedestrian.child': 'pedestrian',
-        'human.pedestrian.construction_worker': 'pedestrian',
-        'human.pedestrian.police_officer': 'pedestrian',
-        'movable_object.trafficcone': 'traffic_cone',
-        'vehicle.trailer': 'trailer',
-        'vehicle.truck': 'truck'
+    'movable_object.barrier': 'barrier',
+    'vehicle.bicycle': 'bicycle',
+    'vehicle.bus.bendy': 'bus',
+    'vehicle.bus.rigid': 'bus',
+    'vehicle.car': 'car',
+    'vehicle.construction': 'construction_vehicle',
+    'vehicle.motorcycle': 'motorcycle',
+    'human.pedestrian.adult': 'pedestrian',
+    'human.pedestrian.child': 'pedestrian',
+    'human.pedestrian.construction_worker': 'pedestrian',
+    'human.pedestrian.police_officer': 'pedestrian',
+    'movable_object.trafficcone': 'traffic_cone',
+    'vehicle.trailer': 'trailer',
+    'vehicle.truck': 'truck'
 }
 filter_lidarseg_classes = tuple(NameMapping.keys())
 
@@ -39,8 +40,8 @@ camera_names = (
     'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_FRONT_LEFT'
 )
 
+
 def generate(dataroot, save_dir):
-    
     nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=False)
     filter_lidarseg_labels = []
     for class_name in filter_lidarseg_classes:
@@ -55,7 +56,7 @@ def generate(dataroot, save_dir):
 
         lidarseg_filename = osp.join(nusc.dataroot, nusc.get('lidarseg', pointsensor_token)['filename'])
         points_seg_raw = np.fromfile(lidarseg_filename, dtype=np.uint8).astype(np.int16)
-        assert len(points_seg_raw)==pc.nbr_points(), "lidarseg size not equal to lidar points"
+        assert len(points_seg_raw) == pc.nbr_points(), "lidarseg size not equal to lidar points"
 
         # map the label of points, -1 means background
         points_seg = np.zeros(points_seg_raw.shape, dtype=np.int16) - 1
@@ -68,6 +69,7 @@ def generate(dataroot, save_dir):
         pc.rotate(Quaternion(cs_record['rotation']).rotation_matrix)
         pc.translate(np.array(cs_record['translation']))
 
+        # ego to global
         poserecord = nusc.get('ego_pose', pointsensor['ego_pose_token'])
         pc.rotate(Quaternion(poserecord['rotation']).rotation_matrix)
         pc.translate(np.array(poserecord['translation']))
@@ -77,18 +79,20 @@ def generate(dataroot, save_dir):
             cam = nusc.get('sample_data', camera_token)
             cam_filename = cam['filename']
 
-            # ego to camera
+            # global to ego
             pc_tmp = copy.deepcopy(pc)
             points_seg_tmp = copy.deepcopy(points_seg)
             poserecord = nusc.get('ego_pose', cam['ego_pose_token'])
             pc_tmp.translate(-np.array(poserecord['translation']))
             pc_tmp.rotate(Quaternion(poserecord['rotation']).rotation_matrix.T)
 
+            # ego to camera
             cs_record = nusc.get('calibrated_sensor', cam['calibrated_sensor_token'])
             pc_tmp.translate(-np.array(cs_record['translation']))
             pc_tmp.rotate(Quaternion(cs_record['rotation']).rotation_matrix.T)
 
-            points_depth = pc_tmp.points[2, :]      
+            points_depth = pc_tmp.points[2, :]
+            points_height = pc_tmp.points[1, :]  # 相机y轴高度
             points = view_points(pc_tmp.points[:3, :], np.array(cs_record['camera_intrinsic']), normalize=True)
             mask = np.ones(points_depth.shape[0], dtype=bool)
             mask = np.logical_and(mask, points_depth > 1.0)
@@ -99,8 +103,12 @@ def generate(dataroot, save_dir):
             points = points[:, mask]
             points_seg_tmp = points_seg_tmp[mask]
             points_depth = points_depth[mask]
-            points_label = np.concatenate([points[:2], points_depth[np.newaxis,:], 
-                                           points_seg_tmp[np.newaxis,:]], axis=0)
+            points_height = points_height[mask]
+            points_label = np.concatenate([points[:2],
+                                           points_depth[np.newaxis, :],
+                                           points_seg_tmp[np.newaxis, :],
+                                           points_height[np.newaxis, :]
+                                           ], axis=0)
             label_save_path = cam_filename.replace('samples', save_dir).replace('.jpg', '.npy')
             label_save_path = osp.join(nusc.dataroot, label_save_path)
 
@@ -108,7 +116,8 @@ def generate(dataroot, save_dir):
                 os.makedirs(osp.dirname(label_save_path))
             np.save(label_save_path, points_label)
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     dataroot = 'data/nuscenes/'
     save_dir = 'samples_point_label'
     generate(dataroot, save_dir)
